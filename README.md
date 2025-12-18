@@ -124,16 +124,6 @@ Each guide follows a consistent structure:
 - **Troubleshooting**: Common issues and solutions
 - **Examples**: Real-world usage patterns
 
-## 🤝 Contributing
-
-These guides were created from real-world experience and incidents. If you have:
-
-- Improvements to existing guides
-- New configurations or workarounds
-- Corrections or clarifications
-
-Feel free to contribute via pull requests or issues.
-
 ## ⚙️ Tech Stack
 
 Tools and technologies covered:

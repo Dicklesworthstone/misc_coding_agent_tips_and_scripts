@@ -24,13 +24,8 @@ On December 17, 2025, an AI agent accidentally destroyed hours of uncommitted wo
 - Zero false positives on normal workflows
 
 **Quick Install:**
-```bash
-# Project-local (current directory)
-curl -fsSL [URL]/install-claude-git-guard.sh | bash
 
-# Global (all projects)
-curl -fsSL [URL]/install-claude-git-guard.sh | bash -s -- --global
-```
+See the [full installation guide](DESTRUCTIVE_GIT_COMMAND_CLAUDE_HOOKS_SETUP.md#automated-setup-script) for the automated setup script that can be used for both project-local and global installation.
 
 > ⚠️ **Important:** Restart Claude Code after installation for hooks to take effect.
 

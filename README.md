@@ -9,7 +9,7 @@ A collection of guides, tips, and configuration scripts for AI coding agents, de
 #### [Destructive Git Command Protection](DESTRUCTIVE_GIT_COMMAND_CLAUDE_HOOKS_SETUP.md)
 **Critical safety hook for Claude Code to prevent data loss**
 
-On December 17, 2025, an AI agent accidentally destroyed hours of uncommitted work by running `git checkout --` on multiple files. This guide provides a mechanical enforcement system to prevent such incidents.
+After an AI agent accidentally destroyed hours of uncommitted work by running `git checkout --` on multiple files, this guide was created to provide a mechanical enforcement system to prevent such incidents.
 
 **What it does:**
 - Blocks destructive git/filesystem commands before execution

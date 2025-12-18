@@ -4,6 +4,12 @@
 
 After installing Claude Code natively (via `curl`), you still see the old version and get "Auto-update failed" errors. This happens because your shell finds an older bun/npm-installed version first in your PATH.
 
+Command to install Claude Code natively is:
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
 **Symptoms:**
 - `claude --version` shows old version despite fresh native install
 - "Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code" message

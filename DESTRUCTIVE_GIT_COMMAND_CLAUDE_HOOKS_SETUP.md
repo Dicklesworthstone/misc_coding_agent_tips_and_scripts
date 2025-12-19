@@ -76,7 +76,7 @@ The `PreToolUse` hook receives the full tool input as JSON via stdin and can:
 | `git push --force` | Destroys remote history |
 | `git push -f` | Same as --force |
 | `git branch -D` | Force-deletes branch without merge check |
-| `rm -rf` | Recursive file deletion |
+| `rm -rf` (non-temp paths) | Recursive file deletion (except `/tmp`, `/var/tmp`, `$TMPDIR`) |
 | `git stash drop` | Permanently deletes stashed changes |
 | `git stash clear` | Deletes ALL stashed changes |
 
@@ -90,6 +90,9 @@ These patterns are allowlisted even if they partially match blocked patterns:
 | `git checkout --orphan` | Creates orphan branch |
 | `git restore --staged` | Only unstages files, doesn't discard changes |
 | `git clean -n` / `--dry-run` | Preview only, no actual deletion |
+| `rm -rf /tmp/...` | Temp directories are designed for ephemeral data |
+| `rm -rf /var/tmp/...` | System temp directory, safe to clean |
+| `rm -rf $TMPDIR/...` | User's temp directory, safe to clean |
 
 ## What Happens When Blocked
 
@@ -118,6 +121,14 @@ echo '{"tool_name": "Bash", "tool_input": {"command": "git checkout -- file.txt"
 
 # Should be allowed (no output)
 echo '{"tool_name": "Bash", "tool_input": {"command": "git status"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# rm -rf on non-temp path should be blocked
+echo '{"tool_name": "Bash", "tool_input": {"command": "rm -rf /some/path"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# rm -rf on temp path should be allowed (no output)
+echo '{"tool_name": "Bash", "tool_input": {"command": "rm -rf /tmp/test-dir"}}' | \
   python3 .claude/hooks/git_safety_guard.py
 ```
 
@@ -268,6 +279,13 @@ SAFE_PATTERNS = [
     r"git\s+restore\s+--staged\s+",      # Unstaging (safe)
     r"git\s+clean\s+-n",                 # Dry run
     r"git\s+clean\s+--dry-run",          # Dry run
+    # Allow rm -rf on temp directories (these are designed for ephemeral data)
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/tmp/",        # /tmp/...
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/var/tmp/",    # /var/tmp/...
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+\$TMPDIR/",    # $TMPDIR/...
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+\$\{TMPDIR",   # ${TMPDIR}/... or ${TMPDIR:-...}
+    r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+"\$TMPDIR/',   # "$TMPDIR/..."
+    r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+"\$\{TMPDIR',  # "${TMPDIR}/..." or "${TMPDIR:-...}"
 ]
 
 
@@ -405,7 +423,7 @@ echo "  • git reset --hard"
 echo "  • git clean -f"
 echo "  • git push --force / -f"
 echo "  • git branch -D"
-echo "  • rm -rf"
+echo "  • rm -rf (except /tmp, /var/tmp, \$TMPDIR)"
 echo "  • git stash drop/clear"
 echo ""
 echo -e "${YELLOW}⚠  IMPORTANT: Restart Claude Code for the hook to take effect.${NC}"
@@ -493,5 +511,6 @@ This silently replaced all those files with their last committed versions, erasi
 ---
 
 *Created: December 17, 2025*
+*Updated: December 19, 2025 - Added temp directory exceptions (/tmp, /var/tmp, $TMPDIR)*
 *Project: Ultimate Bug Scanner*
 *Related: AGENTS.md, .claude/hooks/git_safety_guard.py*

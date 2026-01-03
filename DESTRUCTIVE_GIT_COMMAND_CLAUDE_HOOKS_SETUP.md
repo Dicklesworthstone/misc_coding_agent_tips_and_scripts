@@ -257,6 +257,7 @@ DESTRUCTIVE_PATTERNS = [
     # Note: [rR] because both -r and -R mean recursive in GNU coreutils
     # Note: [a-zA-Z] to handle any flag combinations
     # Note: Specific root/home pattern MUST come before generic pattern for correct error message
+    # Note: Also catch separate flags (-r -f) and long options (--recursive --force)
     (
         r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+[/~]|rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+[/~]",
         "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Ask the user to run it manually if truly needed."
@@ -264,6 +265,16 @@ DESTRUCTIVE_PATTERNS = [
     (
         r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f|rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR]",
         "rm -rf is destructive and requires human approval. Explain what you want to delete and why, then ask the user to run the command manually."
+    ),
+    # Catch rm with separate -r and -f flags (e.g., rm -r -f, rm -f -r, rm -r -i -f)
+    (
+        r"rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f|rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]",
+        "rm with separate -r -f flags is destructive and requires human approval."
+    ),
+    # Catch rm with long options (--recursive, --force)
+    (
+        r"rm\s+.*--recursive.*--force|rm\s+.*--force.*--recursive",
+        "rm --recursive --force is destructive and requires human approval."
     ),
     # Git stash drop/clear without explicit permission
     (
@@ -300,6 +311,15 @@ SAFE_PATTERNS = [
     r'rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+"\$TMPDIR/',   # "$TMPDIR/..." (-fr style)
     r'rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+"\$\{TMPDIR',  # "${TMPDIR}/..." (-rf style)
     r'rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+"\$\{TMPDIR',  # "${TMPDIR}/..." (-fr style)
+    # Also allow separate flags (-r -f) and long options on temp directories
+    r"rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+/tmp/",      # rm -r -f /tmp/...
+    r"rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+/tmp/",      # rm -f -r /tmp/...
+    r"rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+/var/tmp/",  # rm -r -f /var/tmp/...
+    r"rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+/var/tmp/",  # rm -f -r /var/tmp/...
+    r"rm\s+.*--recursive.*--force\s+/tmp/",   # rm --recursive --force /tmp/...
+    r"rm\s+.*--force.*--recursive\s+/tmp/",   # rm --force --recursive /tmp/...
+    r"rm\s+.*--recursive.*--force\s+/var/tmp/",
+    r"rm\s+.*--force.*--recursive\s+/var/tmp/",
 ]
 
 
@@ -311,7 +331,8 @@ def main():
         sys.exit(0)
 
     tool_name = input_data.get("tool_name", "")
-    tool_input = input_data.get("tool_input", {})
+    # Use 'or {}' to handle both missing key AND explicit null value
+    tool_input = input_data.get("tool_input") or {}
     command = tool_input.get("command", "")
 
     # Only check Bash commands
@@ -526,6 +547,6 @@ This silently replaced all those files with their last committed versions, erasi
 ---
 
 *Created: December 17, 2025*
-*Updated: January 3, 2026 - Fixed case sensitivity (git branch -d vs -D), rm -Rf/-fR flag handling, improved pattern ordering and error messages*
+*Updated: January 3, 2026 - Fixed null input crash, added rm -r -f separate flags and --recursive --force long options patterns, case sensitivity fixes, rm -Rf/-fR handling*
 *Project: Ultimate Bug Scanner*
 *Related: AGENTS.md, .claude/hooks/git_safety_guard.py*

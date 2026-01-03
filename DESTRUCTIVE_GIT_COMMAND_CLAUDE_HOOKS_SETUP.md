@@ -218,12 +218,12 @@ DESTRUCTIVE_PATTERNS = [
         "git checkout <ref> -- <path> overwrites working tree. Use 'git stash' first."
     ),
     (
-        r"git\s+restore\s+(?!--staged\b)[^\s]*\s*$",
+        r"git\s+restore\s+(?!--staged\b)(?!-S\b)",
         "git restore discards uncommitted changes. Use 'git stash' or 'git diff' first."
     ),
     (
-        r"git\s+restore\s+--worktree",
-        "git restore --worktree discards uncommitted changes permanently."
+        r"git\s+restore\s+--worktree|git\s+restore\s+-W\b",
+        "git restore --worktree/-W discards uncommitted changes permanently."
     ),
     # Git reset variants
     (
@@ -240,8 +240,9 @@ DESTRUCTIVE_PATTERNS = [
         "git clean -f removes untracked files permanently. Review with 'git clean -n' first."
     ),
     # Force operations
+    # Note: (?![-a-z]) ensures we only block bare --force, not --force-with-lease or --force-if-includes
     (
-        r"git\s+push\s+.*--force(?!-with-lease)",
+        r"git\s+push\s+.*--force(?![-a-z])",
         "Force push can destroy remote history. Use --force-with-lease if necessary."
     ),
     (
@@ -280,6 +281,7 @@ SAFE_PATTERNS = [
     r"git\s+checkout\s+-b\s+",           # Creating new branch
     r"git\s+checkout\s+--orphan\s+",     # Creating orphan branch
     r"git\s+restore\s+--staged\s+",      # Unstaging (safe)
+    r"git\s+restore\s+-S\s+",            # Unstaging short form (safe)
     r"git\s+clean\s+-n",                 # Dry run
     r"git\s+clean\s+--dry-run",          # Dry run
     # Allow rm -rf on temp directories (designed for ephemeral data)

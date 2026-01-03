@@ -222,7 +222,7 @@ DESTRUCTIVE_PATTERNS = [
         "git restore discards uncommitted changes. Use 'git stash' or 'git diff' first."
     ),
     (
-        r"git\s+restore\s+--worktree|git\s+restore\s+-W\b",
+        r"git\s+restore\s+.*(?:--worktree|-W\b)",
         "git restore --worktree/-W discards uncommitted changes permanently."
     ),
     # Git reset variants
@@ -280,8 +280,9 @@ DESTRUCTIVE_PATTERNS = [
 SAFE_PATTERNS = [
     r"git\s+checkout\s+-b\s+",           # Creating new branch
     r"git\s+checkout\s+--orphan\s+",     # Creating orphan branch
-    r"git\s+restore\s+--staged\s+",      # Unstaging (safe)
-    r"git\s+restore\s+-S\s+",            # Unstaging short form (safe)
+    # Unstaging is safe, BUT NOT if --worktree/-W is also present (that modifies working tree)
+    r"git\s+restore\s+--staged\s+(?!.*--worktree)(?!.*-W\b)",  # Unstaging only (safe)
+    r"git\s+restore\s+-S\s+(?!.*--worktree)(?!.*-W\b)",        # Unstaging short form (safe)
     r"git\s+clean\s+-n",                 # Dry run
     r"git\s+clean\s+--dry-run",          # Dry run
     # Allow rm -rf on temp directories (designed for ephemeral data)

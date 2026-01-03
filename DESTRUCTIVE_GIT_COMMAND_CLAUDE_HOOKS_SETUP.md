@@ -246,7 +246,7 @@ DESTRUCTIVE_PATTERNS = [
         "Force push can destroy remote history. Use --force-with-lease if necessary."
     ),
     (
-        r"git\s+push\s+-f\b",
+        r"git\s+push\s+.*-f\b",
         "Force push (-f) can destroy remote history. Use --force-with-lease if necessary."
     ),
     (
@@ -335,8 +335,9 @@ def main():
     tool_input = input_data.get("tool_input") or {}
     command = tool_input.get("command", "")
 
-    # Only check Bash commands
-    if tool_name != "Bash" or not command:
+    # Only check Bash commands with valid string command
+    # Note: isinstance check prevents TypeError if command is int/list/bool
+    if tool_name != "Bash" or not isinstance(command, str) or not command:
         sys.exit(0)
 
     # Check if command matches any safe pattern first
@@ -547,6 +548,6 @@ This silently replaced all those files with their last committed versions, erasi
 ---
 
 *Created: December 17, 2025*
-*Updated: January 3, 2026 - Fixed null input crash, added rm -r -f separate flags and --recursive --force long options patterns, case sensitivity fixes, rm -Rf/-fR handling*
+*Updated: January 3, 2026 - Fixed null input crash, non-string command crash, added rm -r -f separate flags and --recursive --force long options patterns, case sensitivity fixes, rm -Rf/-fR handling*
 *Project: Ultimate Bug Scanner*
 *Related: AGENTS.md, .claude/hooks/git_safety_guard.py*

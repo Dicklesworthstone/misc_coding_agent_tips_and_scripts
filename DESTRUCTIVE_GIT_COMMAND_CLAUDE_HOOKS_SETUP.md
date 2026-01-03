@@ -253,13 +253,16 @@ DESTRUCTIVE_PATTERNS = [
         "git branch -D force-deletes without merge check. Use -d for safety."
     ),
     # Destructive filesystem commands
+    # Note: [rR] because both -r and -R mean recursive in GNU coreutils
+    # Note: [a-zA-Z] to handle any flag combinations
+    # Note: Specific root/home pattern MUST come before generic pattern for correct error message
     (
-        r"rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r",
-        "rm -rf is destructive. List files first, then delete individually with permission."
+        r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+[/~]|rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+[/~]",
+        "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Ask the user to run it manually if truly needed."
     ),
     (
-        r"rm\s+-rf\s+[/~]",
-        "rm -rf on root or home paths is extremely dangerous."
+        r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f|rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR]",
+        "rm -rf is destructive and requires human approval. Explain what you want to delete and why, then ask the user to run the command manually."
     ),
     # Git stash drop/clear without explicit permission
     (
@@ -279,13 +282,21 @@ SAFE_PATTERNS = [
     r"git\s+restore\s+--staged\s+",      # Unstaging (safe)
     r"git\s+clean\s+-n",                 # Dry run
     r"git\s+clean\s+--dry-run",          # Dry run
-    # Allow rm -rf on temp directories (these are designed for ephemeral data)
-    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/tmp/",        # /tmp/...
-    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/var/tmp/",    # /var/tmp/...
-    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+\$TMPDIR/",    # $TMPDIR/...
-    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+\$\{TMPDIR",   # ${TMPDIR}/... or ${TMPDIR:-...}
-    r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+"\$TMPDIR/',   # "$TMPDIR/..."
-    r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+"\$\{TMPDIR',  # "${TMPDIR}/..." or "${TMPDIR:-...}"
+    # Allow rm -rf on temp directories (designed for ephemeral data)
+    # Note: [rR] because both -r and -R mean recursive
+    # Note: Must handle BOTH flag orderings: -rf/-Rf AND -fr/-fR
+    r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+/tmp/",        # /tmp/... (-rf, -Rf style)
+    r"rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+/tmp/",        # /tmp/... (-fr, -fR style)
+    r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+/var/tmp/",    # /var/tmp/... (-rf style)
+    r"rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+/var/tmp/",    # /var/tmp/... (-fr style)
+    r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+\$TMPDIR/",    # $TMPDIR/... (-rf style)
+    r"rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+\$TMPDIR/",    # $TMPDIR/... (-fr style)
+    r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+\$\{TMPDIR",   # ${TMPDIR}/... (-rf style)
+    r"rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+\$\{TMPDIR",   # ${TMPDIR}/... (-fr style)
+    r'rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+"\$TMPDIR/',   # "$TMPDIR/..." (-rf style)
+    r'rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+"\$TMPDIR/',   # "$TMPDIR/..." (-fr style)
+    r'rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+"\$\{TMPDIR',  # "${TMPDIR}/..." (-rf style)
+    r'rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+"\$\{TMPDIR',  # "${TMPDIR}/..." (-fr style)
 ]
 
 
@@ -306,12 +317,13 @@ def main():
 
     # Check if command matches any safe pattern first
     for pattern in SAFE_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
+        if re.search(pattern, command):
             sys.exit(0)
 
     # Check if command matches any destructive pattern
+    # Note: Case-sensitive matching is intentional - e.g., git branch -D vs -d are different!
     for pattern, reason in DESTRUCTIVE_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
+        if re.search(pattern, command):
             output = {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -511,6 +523,6 @@ This silently replaced all those files with their last committed versions, erasi
 ---
 
 *Created: December 17, 2025*
-*Updated: December 19, 2025 - Added temp directory exceptions (/tmp, /var/tmp, $TMPDIR)*
+*Updated: January 3, 2026 - Fixed case sensitivity (git branch -d vs -D), rm -Rf/-fR flag handling, improved pattern ordering and error messages*
 *Project: Ultimate Bug Scanner*
 *Related: AGENTS.md, .claude/hooks/git_safety_guard.py*

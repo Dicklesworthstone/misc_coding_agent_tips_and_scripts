@@ -38,9 +38,19 @@ The `PreToolUse` hook receives the full tool input as JSON via stdin and can:
 `git_safety_guard.py` is a Python script that:
 
 1. Receives the command about to be executed via JSON stdin
-2. Checks if it matches any dangerous patterns
-3. Returns a deny decision with explanation if blocked
-4. Silently allows safe commands
+2. Checks if it matches any safe patterns (allowlist)
+3. Checks if it matches any dangerous patterns → **blocks completely**
+4. Checks if it matches any risky patterns → **prompts user for confirmation**
+5. Silently allows all other commands
+
+### Two-Tier Protection
+
+The hook uses a **two-tier system**:
+
+- **DANGEROUS** patterns are **blocked completely** (🚫) - catastrophic operations that should never run automatically
+- **RISKY** patterns **prompt the user** (⚠️) - dangerous but sometimes needed, user decides
+
+This allows flexibility for legitimate operations while still preventing catastrophic mistakes.
 
 ### Configuration
 
@@ -64,21 +74,39 @@ The `PreToolUse` hook receives the full tool input as JSON via stdin and can:
 }
 ```
 
-## Commands Blocked
+## Commands Blocked (DANGEROUS)
+
+These commands are **blocked completely** - the agent cannot proceed even with user approval in the hook.
 
 | Command Pattern | Why It's Dangerous |
 |-----------------|-------------------|
-| `git checkout -- <files>` | Discards uncommitted changes permanently |
-| `git restore <files>` | Same as checkout -- (newer syntax) |
+| `rm -rf /` or `rm -rf ~` | Catastrophic filesystem destruction |
+| `git push --force main/master` | Destroys shared remote history |
+| `git stash clear` | Permanently deletes ALL stashed changes |
+| `git restore <files>` | Discards uncommitted changes (use `git stash` first) |
+| `git restore --worktree` | Discards uncommitted changes permanently |
 | `git reset --hard` | Destroys all uncommitted changes |
 | `git reset --merge` | Can lose uncommitted changes |
 | `git clean -f` | Removes untracked files permanently |
-| `git push --force` | Destroys remote history |
+
+## Commands That Prompt User (RISKY)
+
+These commands **prompt the user for confirmation** - the user can approve or reject.
+
+| Command Pattern | Why It's Risky |
+|-----------------|----------------|
+| `git checkout -- <files>` | Discards uncommitted changes |
+| `git checkout <path>` (old-style) | Discards uncommitted changes (without `--`) |
+| `git push --force` (non-main branches) | Can destroy remote history |
 | `git push -f` | Same as --force |
 | `git branch -D` | Force-deletes branch without merge check |
-| `rm -rf` (non-temp paths) | Recursive file deletion (except `/tmp`, `/var/tmp`, `$TMPDIR`) |
-| `git stash drop` | Permanently deletes stashed changes |
-| `git stash clear` | Deletes ALL stashed changes |
+| `rm -rf` (non-root paths) | Recursive file deletion |
+| `rm <file>` | Deletes source files |
+| `git stash drop` | Permanently deletes single stash |
+| `> file.rs` | Truncates file to zero bytes |
+| `: > file` | Truncates file to zero bytes |
+| `truncate <file>` | Truncates file |
+| `mv -f <src> <dest>` | Overwrites file without backup |
 
 ## Commands Explicitly Allowed
 
@@ -96,35 +124,39 @@ These patterns are allowlisted even if they partially match blocked patterns:
 
 ## What Happens When Blocked
 
-When Claude tries to run a blocked command, it receives feedback like:
+When Claude tries to run a **dangerous** command, it receives feedback like:
 
 ```
-BLOCKED by git_safety_guard.py
+🚫 BLOCKED: git reset --hard destroys uncommitted changes.
 
-Reason: git checkout -- discards uncommitted changes permanently. Use 'git stash' first.
-
-Command: git checkout -- file.txt
-
-If this operation is truly needed, ask the user for explicit permission and have them run the command manually.
+Run this command manually if truly needed.
 ```
 
 The command never executes. Claude sees this feedback and should ask the user for help.
+
+When Claude tries to run a **risky** command, the user sees a prompt:
+
+```
+⚠️  This discards uncommitted changes. Continue?
+```
+
+The user can then approve or reject the command.
 
 ## Testing the Hook
 
 You can test the hook manually:
 
 ```bash
-# Should be blocked
+# Should be BLOCKED (dangerous)
+echo '{"tool_name": "Bash", "tool_input": {"command": "git reset --hard"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# Should PROMPT user (risky)
 echo '{"tool_name": "Bash", "tool_input": {"command": "git checkout -- file.txt"}}' | \
   python3 .claude/hooks/git_safety_guard.py
 
 # Should be allowed (no output)
 echo '{"tool_name": "Bash", "tool_input": {"command": "git status"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-
-# rm -rf on non-temp path should be blocked
-echo '{"tool_name": "Bash", "tool_input": {"command": "rm -rf /some/path"}}' | \
   python3 .claude/hooks/git_safety_guard.py
 
 # rm -rf on temp path should be allowed (no output)
@@ -141,6 +173,14 @@ Claude Code snapshots hook configuration at startup. After adding or modifying h
 ### Project-Specific
 
 This hook is configured in `.claude/settings.json` within the project directory, so it only applies to sessions in that project. For global protection across all projects, add the hook to `~/.claude/settings.json` instead.
+
+### Works with Bypass Mode
+
+The `ask` permission decision **still prompts the user** even when running in bypass permissions mode. This ensures risky operations always get human oversight.
+
+### Chained Commands
+
+The hook catches patterns in chained commands like `touch file && rm file` because it searches the entire command string.
 
 ### Not Foolproof
 
@@ -195,95 +235,138 @@ cat > "$INSTALL_DIR/hooks/git_safety_guard.py" << 'PYTHON_SCRIPT'
 """
 Git/filesystem safety guard for Claude Code.
 
-Blocks destructive commands that can lose uncommitted work or delete files.
-This hook runs before Bash commands execute and can deny dangerous operations.
+Protects against destructive commands that can lose uncommitted work or delete files.
+This hook runs before Bash commands execute.
 
-Exit behavior:
-  - Exit 0 with JSON {"hookSpecificOutput": {"permissionDecision": "deny", ...}} = block
-  - Exit 0 with no output = allow
+Permission decisions:
+  - "deny"  = Block completely (truly dangerous, catastrophic)
+  - "ask"   = Prompt user for confirmation (risky but sometimes needed)
+  - (no output) = Allow
 """
 import json
 import re
 import sys
 
-# Destructive patterns to block - tuple of (regex, reason)
-DESTRUCTIVE_PATTERNS = [
-    # Git commands that discard uncommitted changes
+# DANGEROUS: Block completely - catastrophic or affects shared resources
+DANGEROUS_PATTERNS = [
+    # Catastrophic filesystem operations
     (
-        r"git\s+checkout\s+--\s+",
-        "git checkout -- discards uncommitted changes permanently. Use 'git stash' first."
+        r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+[/~]\s*$",
+        "rm -rf on root or home is catastrophic."
     ),
     (
-        r"git\s+checkout\s+(?!-b\b)(?!--orphan\b)[^\s]+\s+--\s+",
-        "git checkout <ref> -- <path> overwrites working tree. Use 'git stash' first."
+        r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+~/\s*$",
+        "rm -rf on home directory is catastrophic."
+    ),
+    # Force push to main/master - affects shared history
+    (
+        r"git\s+push\s+.*--force(?!-with-lease).*\s+(main|master)\b",
+        "Force push to main/master destroys shared history."
     ),
     (
-        r"git\s+restore\s+(?!--staged\b)(?!-S\b)",
-        "git restore discards uncommitted changes. Use 'git stash' or 'git diff' first."
+        r"git\s+push\s+-f\b.*\s+(main|master)\b",
+        "Force push to main/master destroys shared history."
+    ),
+    # Clear all stashes - no recovery
+    (
+        r"git\s+stash\s+clear",
+        "git stash clear permanently deletes ALL stashed changes."
+    ),
+    # Git restore - discards uncommitted changes
+    (
+        r"git\s+restore\s+(?!--staged\b)[^\s]*\s*$",
+        "git restore discards uncommitted changes."
     ),
     (
-        r"git\s+restore\s+.*(?:--worktree|-W\b)",
-        "git restore --worktree/-W discards uncommitted changes permanently."
+        r"git\s+restore\s+--worktree",
+        "git restore --worktree discards uncommitted changes."
     ),
-    # Git reset variants
+    # Git reset variants - destroys uncommitted changes
     (
         r"git\s+reset\s+--hard",
-        "git reset --hard destroys uncommitted changes. Use 'git stash' first."
+        "git reset --hard destroys uncommitted changes."
     ),
     (
         r"git\s+reset\s+--merge",
         "git reset --merge can lose uncommitted changes."
     ),
-    # Git clean
+    # Git clean - removes untracked files
     (
         r"git\s+clean\s+-[a-z]*f",
-        "git clean -f removes untracked files permanently. Review with 'git clean -n' first."
+        "git clean -f removes untracked files permanently."
     ),
-    # Force operations
-    # Note: (?![-a-z]) ensures we only block bare --force, not --force-with-lease or --force-if-includes
+]
+
+# RISKY: Prompt user - dangerous but sometimes needed
+RISKY_PATTERNS = [
+    # Git checkout variants that discard changes
     (
-        r"git\s+push\s+.*--force(?![-a-z])",
-        "Force push can destroy remote history. Use --force-with-lease if necessary."
+        r"git\s+checkout\s+--\s+",
+        "This discards uncommitted changes. Continue?"
     ),
     (
-        r"git\s+push\s+.*-f\b",
-        "Force push (-f) can destroy remote history. Use --force-with-lease if necessary."
+        r"git\s+checkout\s+(?!-b\b)(?!--orphan\b)[^\s]+\s+--\s+",
+        "This overwrites working tree files. Continue?"
     ),
+    # git checkout <path> without -- (old-style syntax)
+    (
+        r"git\s+checkout\s+(?!-)[^\s]*[/][^\s]*\.[a-zA-Z]+\s*(?:2>|$|&&|\|\|)",
+        "This discards uncommitted changes. Continue?"
+    ),
+    (
+        r"git\s+checkout\s+(?!-)[^\s]+\.(rs|ts|js|vue|py|lua|json|toml|md|txt|yaml|yml|sh|css|html)\s*(?:2>|$|&&|\|\|)",
+        "This discards uncommitted changes. Continue?"
+    ),
+    # Force push (not to main/master - those are blocked above)
+    (
+        r"git\s+push\s+.*--force(?!-with-lease)",
+        "Force push can destroy remote history. Continue?"
+    ),
+    (
+        r"git\s+push\s+-f\b",
+        "Force push can destroy remote history. Continue?"
+    ),
+    # Branch force delete
     (
         r"git\s+branch\s+-D\b",
-        "git branch -D force-deletes without merge check. Use -d for safety."
+        "git branch -D force-deletes without merge check. Continue?"
     ),
-    # Destructive filesystem commands
-    # Note: [rR] because both -r and -R mean recursive in GNU coreutils
-    # Note: [a-zA-Z] to handle any flag combinations
-    # Note: Specific root/home pattern MUST come before generic pattern for correct error message
-    # Note: Also catch separate flags (-r -f) and long options (--recursive --force)
+    # rm -rf (general, not root/home - those are blocked above)
     (
-        r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+[/~]|rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+[/~]",
-        "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Ask the user to run it manually if truly needed."
+        r"rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r",
+        "rm -rf is destructive. Continue?"
     ),
-    (
-        r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f|rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR]",
-        "rm -rf is destructive and requires human approval. Explain what you want to delete and why, then ask the user to run the command manually."
-    ),
-    # Catch rm with separate -r and -f flags (e.g., rm -r -f, rm -f -r, rm -r -i -f)
-    (
-        r"rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f|rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]",
-        "rm with separate -r -f flags is destructive and requires human approval."
-    ),
-    # Catch rm with long options (--recursive, --force)
-    (
-        r"rm\s+.*--recursive.*--force|rm\s+.*--force.*--recursive",
-        "rm --recursive --force is destructive and requires human approval."
-    ),
-    # Git stash drop/clear without explicit permission
+    # Git stash drop (single stash)
     (
         r"git\s+stash\s+drop",
-        "git stash drop permanently deletes stashed changes. List stashes first."
+        "git stash drop permanently deletes stashed changes. Continue?"
+    ),
+    # Plain rm on source files
+    (
+        r"rm\s+(?!-)[^\s]*\.(rs|ts|js|vue|py|lua|json|toml|md|txt|yaml|yml|sh|css|html)\b",
+        "This deletes a source file. Continue?"
     ),
     (
-        r"git\s+stash\s+clear",
-        "git stash clear permanently deletes ALL stashed changes."
+        r"rm\s+(?!-)[^\s]*[/][^\s]*\.[a-zA-Z]+\s*(?:2>|$|&&|\|\||;)",
+        "This deletes a file. Continue?"
+    ),
+    # File truncation (silent and destructive)
+    (
+        r"(?:^|&&|\|\||;)\s*>\s*[^\s]+\.(rs|ts|js|vue|py|lua|json|toml|md|txt|yaml|yml|sh|css|html)\b",
+        "This truncates a file to zero bytes. Continue?"
+    ),
+    (
+        r":\s*>\s*[^\s]+\.[a-zA-Z]+",
+        "This truncates a file to zero bytes. Continue?"
+    ),
+    (
+        r"truncate\s+(-s\s*0\s+)?[^\s]+\.[a-zA-Z]+",
+        "This truncates a file. Continue?"
+    ),
+    # Overwrite without backup (mv -f)
+    (
+        r"mv\s+-[a-z]*f[a-z]*\s+[^\s]+\s+[^\s]+\.(rs|ts|js|vue|py|lua|json|toml|md|txt|yaml|yml|sh|css|html)\b",
+        "This overwrites a file without backup. Continue?"
     ),
 ]
 
@@ -291,78 +374,64 @@ DESTRUCTIVE_PATTERNS = [
 SAFE_PATTERNS = [
     r"git\s+checkout\s+-b\s+",           # Creating new branch
     r"git\s+checkout\s+--orphan\s+",     # Creating orphan branch
-    # Unstaging is safe, BUT NOT if --worktree/-W is also present (that modifies working tree)
-    r"git\s+restore\s+--staged\s+(?!.*--worktree)(?!.*-W\b)",  # Unstaging only (safe)
-    r"git\s+restore\s+-S\s+(?!.*--worktree)(?!.*-W\b)",        # Unstaging short form (safe)
+    r"git\s+restore\s+--staged\s+",      # Unstaging (safe)
     r"git\s+clean\s+-n",                 # Dry run
     r"git\s+clean\s+--dry-run",          # Dry run
-    # Allow rm -rf on temp directories (designed for ephemeral data)
-    # Note: [rR] because both -r and -R mean recursive
-    # Note: Must handle BOTH flag orderings: -rf/-Rf AND -fr/-fR
-    r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+/tmp/",        # /tmp/... (-rf, -Rf style)
-    r"rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+/tmp/",        # /tmp/... (-fr, -fR style)
-    r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+/var/tmp/",    # /var/tmp/... (-rf style)
-    r"rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+/var/tmp/",    # /var/tmp/... (-fr style)
-    r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+\$TMPDIR/",    # $TMPDIR/... (-rf style)
-    r"rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+\$TMPDIR/",    # $TMPDIR/... (-fr style)
-    r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+\$\{TMPDIR",   # ${TMPDIR}/... (-rf style)
-    r"rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+\$\{TMPDIR",   # ${TMPDIR}/... (-fr style)
-    r'rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+"\$TMPDIR/',   # "$TMPDIR/..." (-rf style)
-    r'rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+"\$TMPDIR/',   # "$TMPDIR/..." (-fr style)
-    r'rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+"\$\{TMPDIR',  # "${TMPDIR}/..." (-rf style)
-    r'rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+"\$\{TMPDIR',  # "${TMPDIR}/..." (-fr style)
-    # Also allow separate flags (-r -f) and long options on temp directories
-    r"rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+/tmp/",      # rm -r -f /tmp/...
-    r"rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+/tmp/",      # rm -f -r /tmp/...
-    r"rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+/var/tmp/",  # rm -r -f /var/tmp/...
-    r"rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+/var/tmp/",  # rm -f -r /var/tmp/...
-    r"rm\s+.*--recursive.*--force\s+/tmp/",   # rm --recursive --force /tmp/...
-    r"rm\s+.*--force.*--recursive\s+/tmp/",   # rm --force --recursive /tmp/...
-    r"rm\s+.*--recursive.*--force\s+/var/tmp/",
-    r"rm\s+.*--force.*--recursive\s+/var/tmp/",
+    # Allow rm -rf on temp directories
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/tmp/",
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/var/tmp/",
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+\$TMPDIR/",
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+\$\{TMPDIR",
+    r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+"\$TMPDIR/',
+    r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+"\$\{TMPDIR',
 ]
+
+
+def make_response(decision: str, reason: str, command: str) -> dict:
+    """Create the hook response JSON."""
+    if decision == "deny":
+        message = f"🚫 BLOCKED: {reason}\n\nRun this command manually if truly needed."
+    else:  # ask
+        message = f"⚠️  {reason}"
+
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": message
+        }
+    }
 
 
 def main():
     try:
         input_data = json.load(sys.stdin)
     except json.JSONDecodeError:
-        # Can't parse input, allow by default
         sys.exit(0)
 
     tool_name = input_data.get("tool_name", "")
-    # Use 'or {}' to handle both missing key AND explicit null value
     tool_input = input_data.get("tool_input") or {}
     command = tool_input.get("command", "")
 
-    # Only check Bash commands with valid string command
-    # Note: isinstance check prevents TypeError if command is int/list/bool
+    # Only check Bash commands
     if tool_name != "Bash" or not isinstance(command, str) or not command:
         sys.exit(0)
 
-    # Check if command matches any safe pattern first
+    # Check safe patterns first (allowlist)
     for pattern in SAFE_PATTERNS:
-        if re.search(pattern, command):
+        if re.search(pattern, command, re.IGNORECASE):
             sys.exit(0)
 
-    # Check if command matches any destructive pattern
-    # Note: Case-sensitive matching is intentional - e.g., git branch -D vs -d are different!
-    for pattern, reason in DESTRUCTIVE_PATTERNS:
-        if re.search(pattern, command):
-            output = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": (
-                        f"BLOCKED by git_safety_guard.py\n\n"
-                        f"Reason: {reason}\n\n"
-                        f"Command: {command}\n\n"
-                        f"If this operation is truly needed, ask the user for explicit "
-                        f"permission and have them run the command manually."
-                    )
-                }
-            }
-            print(json.dumps(output))
+    # Check dangerous patterns (block completely)
+    for pattern, reason in DANGEROUS_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
+            print(json.dumps(make_response("deny", reason, command)))
+            sys.exit(0)
+
+    # Check risky patterns (prompt user)
+    for pattern, reason in RISKY_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
+            print(json.dumps(make_response("ask", reason, command)))
             sys.exit(0)
 
     # Allow all other commands
@@ -453,26 +522,43 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN}Installation complete!${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
 echo ""
-echo "The following destructive commands are now blocked:"
-echo "  • git checkout -- <files>"
+echo -e "${RED}🚫 BLOCKED (dangerous):${NC}"
 echo "  • git restore <files>"
-echo "  • git reset --hard"
+echo "  • git reset --hard / --merge"
 echo "  • git clean -f"
-echo "  • git push --force / -f"
+echo "  • git push --force main/master"
+echo "  • git stash clear"
+echo "  • rm -rf / or ~"
+echo ""
+echo -e "${YELLOW}⚠️  PROMPTS (risky):${NC}"
+echo "  • git checkout <files>"
+echo "  • git push --force (non-main branches)"
 echo "  • git branch -D"
-echo "  • rm -rf (except /tmp, /var/tmp, \$TMPDIR)"
-echo "  • git stash drop/clear"
+echo "  • rm -rf <dir>, rm <file>"
+echo "  • git stash drop"
+echo "  • File truncation (> file)"
+echo "  • mv -f overwrite"
 echo ""
 echo -e "${YELLOW}⚠  IMPORTANT: Restart Claude Code for the hook to take effect.${NC}"
 echo ""
 
 # Test the hook
 echo "Testing hook..."
-TEST_RESULT=$(echo '{"tool_name": "Bash", "tool_input": {"command": "git checkout -- test.txt"}}' | \
+TEST_RESULT=$(echo '{"tool_name": "Bash", "tool_input": {"command": "git reset --hard"}}' | \
     python3 "$INSTALL_DIR/hooks/git_safety_guard.py" 2>/dev/null || true)
 
 if echo "$TEST_RESULT" | grep -q "permissionDecision.*deny" 2>/dev/null; then
-    echo -e "${GREEN}✓${NC} Hook test passed - destructive commands will be blocked"
+    echo -e "${GREEN}✓${NC} Hook test passed - dangerous commands blocked"
+else
+    echo -e "${RED}✗${NC} Hook test failed - check Python installation"
+    exit 1
+fi
+
+TEST_RESULT2=$(echo '{"tool_name": "Bash", "tool_input": {"command": "git checkout -- file.txt"}}' | \
+    python3 "$INSTALL_DIR/hooks/git_safety_guard.py" 2>/dev/null || true)
+
+if echo "$TEST_RESULT2" | grep -q "permissionDecision.*ask" 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} Hook test passed - risky commands prompt user"
 else
     echo -e "${RED}✗${NC} Hook test failed - check Python installation"
     exit 1
@@ -507,14 +593,24 @@ If you prefer not to use the script:
 
 ## Adding More Blocked Commands
 
-Edit `git_safety_guard.py` and add patterns to `DESTRUCTIVE_PATTERNS`:
+Edit `git_safety_guard.py` and add patterns to the appropriate list:
 
 ```python
-DESTRUCTIVE_PATTERNS = [
+# Block completely (catastrophic operations)
+DANGEROUS_PATTERNS = [
     # ... existing patterns ...
     (
         r"your-regex-pattern",
-        "Explanation of why this is dangerous"
+        "Explanation of why this is dangerous."
+    ),
+]
+
+# Prompt user (risky but sometimes needed)
+RISKY_PATTERNS = [
+    # ... existing patterns ...
+    (
+        r"your-regex-pattern",
+        "Question for user. Continue?"
     ),
 ]
 ```
@@ -548,6 +644,6 @@ This silently replaced all those files with their last committed versions, erasi
 ---
 
 *Created: December 17, 2025*
-*Updated: January 3, 2026 - Fixed null input crash, non-string command crash, added rm -r -f separate flags and --recursive --force long options patterns, case sensitivity fixes, rm -Rf/-fR handling*
+*Updated: January 4, 2026 - Two-tier system (DANGEROUS blocks, RISKY prompts), old-style git checkout detection, file truncation patterns, mv -f detection, emoji indicators*
 *Project: Ultimate Bug Scanner*
 *Related: AGENTS.md, .claude/hooks/git_safety_guard.py*

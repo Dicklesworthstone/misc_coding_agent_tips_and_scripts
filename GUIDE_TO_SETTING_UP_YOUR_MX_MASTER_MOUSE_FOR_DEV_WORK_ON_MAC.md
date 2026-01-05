@@ -76,6 +76,19 @@ This works well because:
 
 > **Note:** I have no affiliation with BetterMouse. It's the best tool I've found for this; Logitech's own software (Logi Options+) cannot map the thumbwheel to arbitrary keyboard shortcuts.
 
+### Keyboard Symbol Reference
+
+This guide uses macOS keyboard symbols. Here's a quick reference:
+
+| Symbol | Mac Key | Windows/Third-Party Keyboard |
+|--------|---------|------------------------------|
+| `⌃` | Control | Ctrl |
+| `⌥` | Option | Alt |
+| `⌘` | Command | Windows key (⊞) |
+| `⇧` | Shift | Shift |
+
+So `⇧⌃ ←` means **Shift + Control + Left Arrow**, and `⌥⌘ →` means **Option + Command + Right Arrow** (or **Alt + Windows + Right Arrow** on third-party keyboards).
+
 ---
 
 ## Part 1: Setting Up BetterMouse
@@ -296,7 +309,7 @@ When you're working remotely, there are potentially multiple "tab" concepts:
 │  │  │  SSH Session                    │  │  │
 │  │  │  ┌───────────────────────────┐  │  │  │
 │  │  │  │  tmux                     │  │  │  │
-│  │  │  │  [Window 1] [Window 2]   │  │  │  │
+│  │  │  │  [Window 1] [Window 2]    │  │  │  │
 │  │  │  │  ← Or these              │  │  │  │
 │  │  │  └───────────────────────────┘  │  │  │
 │  │  └─────────────────────────────────┘  │  │

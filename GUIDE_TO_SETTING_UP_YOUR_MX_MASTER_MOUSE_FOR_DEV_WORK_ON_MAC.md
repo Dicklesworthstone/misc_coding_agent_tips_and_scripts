@@ -10,6 +10,7 @@ If you just want to get this working:
 
 1. **Install [BetterMouse](https://better-mouse.com)** ($10 one-time) and grant accessibility permissions
 2. **Configure thumbwheel** in BetterMouse → Buttons tab:
+   - First, scroll the thumbwheel to register it (BetterMouse detects buttons on first use)
    - Thumbwheel << → `Ctrl+Shift+Left` (displays as `⇧⌃ ←`)
    - Thumbwheel >> → `Ctrl+Shift+Right` (displays as `⇧⌃ →`)
 3. **Add keybindings** to your apps (see [Application Configs](#quick-reference-configs) below)
@@ -31,6 +32,7 @@ Read on for the full explanation and rationale.
 - [Troubleshooting](#troubleshooting)
 - [Appendix: Why Ctrl+Shift+Arrow?](#appendix-why-ctrlshiftarrow)
 - [Quick Reference Configs](#quick-reference-configs)
+- [Appendix: Automating BetterMouse Configuration](#appendix-automating-bettermouse-configuration)
 
 ---
 
@@ -106,7 +108,12 @@ So `⇧⌃ ←` means **Shift + Control + Left Arrow**, and `⌥⌘ →` means *
 
 1. Open BetterMouse from the menu bar
 2. Go to the **Buttons** tab
-3. Scroll down to find the thumbwheel settings:
+3. **Important: Detect the thumbwheel first**
+   - BetterMouse uses event-driven detection—it only shows buttons/gestures after you use them
+   - You'll see a prompt: *"Press a mouse button to add a new item"*
+   - **Scroll the thumbwheel left or right** to register it
+   - The thumbwheel options will appear once detected
+4. Configure the thumbwheel to match this target state:
 
 | Gesture | Action | Click-through | Multi-shot |
 |---------|--------|---------------|------------|
@@ -114,16 +121,16 @@ So `⇧⌃ ←` means **Shift + Control + Left Arrow**, and `⌥⌘ →` means *
 | Thumbwheel << | `⇧⌃ ←` | ☐ | ☐ |
 | Thumbwheel >> | `⇧⌃ →` | ☐ | ☐ |
 
-4. **To set the left scroll (Thumbwheel <<):**
+5. **To set the left scroll (Thumbwheel <<):**
    - Click the dropdown next to "Thumbwheel <<"
    - With the dropdown open, press `Ctrl + Shift + Left Arrow` on your keyboard
    - It should display as `⇧⌃ ←`
 
-5. **To set the right scroll (Thumbwheel >>):**
+6. **To set the right scroll (Thumbwheel >>):**
    - Same process: press `Ctrl + Shift + Right Arrow`
    - Should display as `⇧⌃ →`
 
-6. **Important checkbox settings:**
+7. **Important checkbox settings:**
    - **Click-through** (☐): Passes clicks to underlying windows; leave **unchecked** for tab switching
    - **Multi-shot** (☐): Triggers the action repeatedly (rapid-fire); keep this **unchecked** to prevent switching multiple tabs per scroll
 
@@ -491,6 +498,519 @@ System Settings → Keyboard → Keyboard Shortcuts → App Shortcuts → +
 - Show Previous Tab: `⌃⇧←`
 - Show Next Tab: `⌃⇧→`
 </details>
+
+---
+
+## Appendix: Automating BetterMouse Configuration
+
+BetterMouse stores its configuration in plist files that can be read and potentially modified for automation or backup purposes.
+
+### Config File Locations
+
+| File | Purpose |
+|------|---------|
+| `~/Library/Preferences/com.naotanhaocan.BetterMouse.plist` | Main configuration (binary plist) |
+| `~/Library/Application Support/BetterMouse/` | Additional app data |
+
+### BetterMouse Config Tool
+
+The plist is stored in binary format with nested binary plists inside. This self-contained Python script handles the complexity and provides export, import, and display commands with beautiful terminal output.
+
+**Requirements:** [uv](https://docs.astral.sh/uv/) (dependencies are auto-installed on first run)
+
+**Usage:**
+```bash
+# View current thumbwheel configuration
+uv run bettermouse_config.py show
+
+# Export config to JSON (for backup or sharing)
+uv run bettermouse_config.py export my_config.json
+
+# Import config from JSON (creates backup first)
+uv run bettermouse_config.py import shared_config.json
+```
+
+**Example output from `show` command:**
+```
+╭───────────────────────────╮
+│ BetterMouse Configuration │
+╰───────────────────────────╯
+Config version: 8566
+       🖱️  Detected Mice
+╭─────────────┬──────────╮
+│ Device      │ Vendor   │
+├─────────────┼──────────┤
+│ MX Master 4 │ Logitech │
+╰─────────────┴──────────╯
+              ⚙️  Thumbwheel Hotkeys
+╭───────────────────┬───────────┬────────────╮
+│ Context           │ Direction │ Hotkey     │
+├───────────────────┼───────────┼────────────┤
+│ Global            │ ◀ Left    │ ⇧⌃ ← Left  │
+│                   │ ▶ Right   │ ⇧⌃ → Right │
+│ com.google.Chrome │ ◀ Left    │ ⌥⌘ ← Left  │
+│                   │ ▶ Right   │ ⌥⌘ → Right │
+╰───────────────────┴───────────┴────────────╯
+
+App Exceptions: com.google.Chrome
+```
+
+<details>
+<summary><strong>bettermouse_config.py</strong> (click to expand)</summary>
+
+```python
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#     "rich>=13.0",
+# ]
+# ///
+"""
+BetterMouse Configuration Tool
+
+Export and import BetterMouse settings to/from readable JSON.
+Useful for backup, version control, or sharing configs.
+
+Usage:
+    uv run bettermouse_config.py export [output.json]
+    uv run bettermouse_config.py import <input.json>
+    uv run bettermouse_config.py show
+
+Or make executable and run directly:
+    chmod +x bettermouse_config.py
+    ./bettermouse_config.py show
+"""
+
+import plistlib
+import json
+import sys
+import os
+from pathlib import Path
+from datetime import datetime
+
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich import box
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+PLIST_PATH = Path.home() / "Library/Preferences/com.naotanhaocan.BetterMouse.plist"
+console = Console()
+
+# Modifier key bitmasks (macOS CGEventFlags)
+MODIFIERS = {
+    'Shift': 0x20000,      # 131072
+    'Control': 0x40000,    # 262144
+    'Option': 0x80000,     # 524288
+    'Command': 0x100000,   # 1048576
+}
+
+# Key codes for common keys
+KEY_CODES = {
+    123: '← Left',
+    124: '→ Right',
+    125: '↓ Down',
+    126: '↑ Up',
+    36: '↵ Return',
+    49: '␣ Space',
+    51: '⌫ Delete',
+    53: '⎋ Escape',
+    48: '⇥ Tab',
+}
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+def decode_modifiers(mod_value: int) -> str:
+    """Decode a hotkeyMod bitmask into human-readable modifier names."""
+    if not mod_value:
+        return "None"
+    mods = []
+    symbols = {'Shift': '⇧', 'Control': '⌃', 'Option': '⌥', 'Command': '⌘'}
+    for name, mask in MODIFIERS.items():
+        if mod_value & mask:
+            mods.append(symbols.get(name, name))
+    return "".join(mods) if mods else "None"
+
+def decode_key(key_code: int) -> str:
+    """Decode a key code into human-readable form."""
+    return KEY_CODES.get(key_code, f"Key({key_code})")
+
+# ============================================================================
+# Plist Encoding/Decoding
+# ============================================================================
+
+def decode_nested(obj):
+    """Recursively decode nested binary plists to Python objects."""
+    if isinstance(obj, dict):
+        return {k: decode_nested(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [decode_nested(item) for item in obj]
+    elif isinstance(obj, bytes):
+        try:
+            nested = plistlib.loads(obj)
+            return decode_nested(nested)
+        except Exception:
+            import base64
+            return {"__binary__": base64.b64encode(obj).decode('ascii'), "__len__": len(obj)}
+    elif isinstance(obj, datetime):
+        return {"__datetime__": obj.isoformat()}
+    else:
+        return obj
+
+def encode_nested(obj):
+    """Recursively encode Python objects back to plist-compatible format."""
+    if isinstance(obj, dict):
+        if "__binary__" in obj:
+            import base64
+            return base64.b64decode(obj["__binary__"])
+        if "__datetime__" in obj:
+            return datetime.fromisoformat(obj["__datetime__"])
+        return {k: encode_nested(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [encode_nested(item) for item in obj]
+    else:
+        return obj
+
+# ============================================================================
+# Commands
+# ============================================================================
+
+def cmd_export(output_path: str = None) -> int:
+    """Export BetterMouse config to JSON."""
+    console.print(Panel.fit(
+        "[bold blue]BetterMouse Config Export[/]",
+        border_style="blue"
+    ))
+
+    if not PLIST_PATH.exists():
+        console.print(f"[red]✗[/] Plist not found: [dim]{PLIST_PATH}[/]")
+        console.print("[dim]  Is BetterMouse installed?[/]")
+        return 1
+
+    with console.status("[cyan]Reading plist...[/]"):
+        try:
+            with open(PLIST_PATH, 'rb') as f:
+                plist = plistlib.load(f)
+        except Exception as e:
+            console.print(f"[red]✗[/] Failed to read plist: {e}")
+            return 1
+
+    console.print(f"[green]✓[/] Loaded: [dim]{PLIST_PATH}[/]")
+
+    with console.status("[cyan]Decoding nested plists...[/]"):
+        decoded = decode_nested(plist)
+
+    console.print("[green]✓[/] Decoded nested binary plists")
+
+    # Generate output filename
+    if not output_path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"bettermouse_config_{timestamp}.json"
+
+    with console.status(f"[cyan]Writing {output_path}...[/]"):
+        try:
+            with open(output_path, 'w') as f:
+                json.dump(decoded, f, indent=2)
+        except Exception as e:
+            console.print(f"[red]✗[/] Failed to write: {e}")
+            return 1
+
+    file_size = os.path.getsize(output_path)
+    console.print(f"[green]✓[/] Exported: [bold]{output_path}[/] ({file_size:,} bytes)")
+
+    # Show summary
+    print_summary(decoded)
+    return 0
+
+def cmd_import(input_path: str) -> int:
+    """Import BetterMouse config from JSON."""
+    console.print(Panel.fit(
+        "[bold yellow]BetterMouse Config Import[/]",
+        border_style="yellow"
+    ))
+
+    if not os.path.exists(input_path):
+        console.print(f"[red]✗[/] File not found: {input_path}")
+        return 1
+
+    with console.status("[cyan]Reading JSON...[/]"):
+        try:
+            with open(input_path, 'r') as f:
+                data = json.load(f)
+        except Exception as e:
+            console.print(f"[red]✗[/] Failed to read JSON: {e}")
+            return 1
+
+    console.print(f"[green]✓[/] Loaded: [bold]{input_path}[/]")
+
+    with console.status("[cyan]Encoding to plist format...[/]"):
+        encoded = encode_nested(data)
+
+    console.print("[green]✓[/] Encoded to plist format")
+
+    # Backup existing
+    if PLIST_PATH.exists():
+        backup_path = PLIST_PATH.with_suffix('.plist.backup')
+        console.print(f"[yellow]⚠[/] Backing up to: [dim]{backup_path}[/]")
+        try:
+            import shutil
+            shutil.copy2(PLIST_PATH, backup_path)
+        except Exception as e:
+            console.print(f"[yellow]⚠[/] Backup failed: {e}")
+
+    with console.status("[cyan]Writing plist...[/]"):
+        try:
+            with open(PLIST_PATH, 'wb') as f:
+                plistlib.dump(encoded, f)
+        except Exception as e:
+            console.print(f"[red]✗[/] Failed to write: {e}")
+            return 1
+
+    console.print(f"[green]✓[/] Imported to: [dim]{PLIST_PATH}[/]")
+    console.print("\n[yellow]⚠ Restart BetterMouse for changes to take effect[/]")
+    return 0
+
+def cmd_show() -> int:
+    """Show current BetterMouse configuration summary."""
+    console.print(Panel.fit(
+        "[bold cyan]BetterMouse Configuration[/]",
+        border_style="cyan"
+    ))
+
+    if not PLIST_PATH.exists():
+        console.print(f"[red]✗[/] Plist not found: [dim]{PLIST_PATH}[/]")
+        return 1
+
+    try:
+        with open(PLIST_PATH, 'rb') as f:
+            plist = plistlib.load(f)
+        decoded = decode_nested(plist)
+        print_summary(decoded)
+        return 0
+    except Exception as e:
+        console.print(f"[red]✗[/] Failed: {e}")
+        return 1
+
+def print_summary(config: dict):
+    """Print a beautiful summary of the configuration."""
+    console.print()
+
+    # Version info
+    version = config.get('version', 'Unknown')
+    console.print(f"[dim]Config version:[/] [bold]{version}[/]")
+
+    # Mice table
+    mice = config.get('mice', {}).get('mice', [])
+    if mice:
+        table = Table(title="🖱️  Detected Mice", box=box.ROUNDED)
+        table.add_column("Device", style="cyan")
+        table.add_column("Vendor", style="dim")
+        for mouse in mice:
+            name = mouse.get('name', {})
+            table.add_row(
+                name.get('product', 'Unknown'),
+                name.get('vendor', 'Unknown')
+            )
+        console.print(table)
+
+    # Thumbwheel config
+    appitems = config.get('appitems', {}).get('apps', {})
+
+    table = Table(title="⚙️  Thumbwheel Hotkeys", box=box.ROUNDED)
+    table.add_column("Context", style="bold")
+    table.add_column("Direction", style="cyan")
+    table.add_column("Hotkey", style="green")
+
+    direction_names = {6: "◀ Left", 8: "▶ Right", 4: "● Press"}
+
+    for app_id, app_config in appitems.items():
+        app_name = app_id if app_id else "Global"
+        btn_config = app_config.get('btn', [])
+
+        i = 0
+        while i < len(btn_config) - 1:
+            btn_id = btn_config[i]
+            if btn_id == 31:  # Thumbwheel
+                gestures = btn_config[i + 1]
+                parse_gestures_to_table(table, app_name, gestures, direction_names)
+            i += 2
+
+    if table.row_count > 0:
+        console.print(table)
+    else:
+        console.print("[dim]No thumbwheel hotkeys configured[/]")
+
+    # App exceptions
+    exceptions = [k for k in appitems.keys() if k]
+    if exceptions:
+        console.print(f"\n[bold]App Exceptions:[/] {', '.join(f'[yellow]{e}[/]' for e in exceptions)}")
+
+    console.print()
+
+def parse_gestures_to_table(table: Table, app_name: str, gestures, direction_names: dict):
+    """Parse thumbwheel gestures and add to table."""
+    if not gestures or len(gestures) < 2:
+        return
+
+    gesture_data = gestures[1] if len(gestures) > 1 else gestures
+    first_for_app = True
+
+    i = 0
+    while i < len(gesture_data):
+        item = gesture_data[i]
+        if isinstance(item, dict) and 'Move' in item:
+            if i + 1 < len(gesture_data):
+                dir_configs = gesture_data[i + 1]
+                j = 0
+                while j < len(dir_configs) - 1:
+                    direction = dir_configs[j]
+                    cfg = dir_configs[j + 1]
+                    if isinstance(cfg, dict) and cfg.get('isHotkey'):
+                        mod = decode_modifiers(cfg.get('hotkeyMod', 0))
+                        key = decode_key(cfg.get('hotkeyKey', 0))
+                        dir_name = direction_names.get(direction, f"Dir {direction}")
+
+                        display_app = app_name if first_for_app else ""
+                        table.add_row(display_app, dir_name, f"{mod} {key}")
+                        first_for_app = False
+                    j += 2
+        i += 1
+
+def print_usage():
+    """Print usage information."""
+    usage = """
+[bold cyan]BetterMouse Configuration Tool[/]
+
+[bold]Usage:[/]
+    uv run bettermouse_config.py [green]export[/] [dim][output.json][/]
+    uv run bettermouse_config.py [yellow]import[/] <input.json>
+    uv run bettermouse_config.py [cyan]show[/]
+
+[bold]Commands:[/]
+    [green]export[/]  Export config to JSON (auto-generates filename if omitted)
+    [yellow]import[/]  Import config from JSON (creates backup first)
+    [cyan]show[/]    Display current thumbwheel hotkey configuration
+
+[bold]Examples:[/]
+    [dim]# View current config[/]
+    uv run bettermouse_config.py show
+
+    [dim]# Export for backup[/]
+    uv run bettermouse_config.py export my_config.json
+
+    [dim]# Share with someone (they import it)[/]
+    uv run bettermouse_config.py import shared_config.json
+
+[bold]Config Location:[/]
+    [dim]{plist}[/]
+""".format(plist=PLIST_PATH)
+    console.print(usage)
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print_usage()
+        return 0
+
+    cmd = sys.argv[1].lower()
+
+    if cmd == 'export':
+        return cmd_export(sys.argv[2] if len(sys.argv) > 2 else None)
+    elif cmd == 'import':
+        if len(sys.argv) < 3:
+            console.print("[red]✗[/] Import requires a file path")
+            return 1
+        return cmd_import(sys.argv[2])
+    elif cmd == 'show':
+        return cmd_show()
+    elif cmd in ['-h', '--help', 'help']:
+        print_usage()
+        return 0
+    else:
+        console.print(f"[red]✗[/] Unknown command: {cmd}")
+        print_usage()
+        return 1
+
+if __name__ == '__main__':
+    sys.exit(main())
+```
+
+</details>
+
+### Config Structure Reference
+
+The decoded config contains these key sections:
+
+```
+├── mice                    # Per-mouse hardware settings
+│   └── [mouse]
+│       ├── name            # {product: "MX Master 4", vendor: "Logitech"}
+│       ├── twUsage         # Thumbwheel mode: Button, Zoom, HScroll, etc.
+│       └── ...             # DPI, haptics, scroll settings
+│
+├── appitems                # Global + per-app button mappings
+│   └── apps
+│       ├── ""              # Global settings (empty string key)
+│       │   └── btn         # Button configurations
+│       │       └── [31]    # Button 31 = Thumbwheel
+│       │           └── Move gesture
+│       │               ├── 6: left scroll  (Thumbwheel <<)
+│       │               ├── 8: right scroll (Thumbwheel >>)
+│       │               └── 4: press/click  (Thumbwheel ↓)
+│       │
+│       └── "com.google.Chrome"  # App-specific exception
+│           └── btn         # Override button mappings for Chrome
+│
+└── config                  # General app settings
+```
+
+### Thumbwheel Hotkey Encoding
+
+Button mappings use these fields:
+
+| Field | Description |
+|-------|-------------|
+| `isHotkey` | `true` if mapped to a keyboard shortcut |
+| `hotkeyMod` | Modifier keys (bitmask, see below) |
+| `hotkeyKey` | Key code (123 = Left Arrow, 124 = Right Arrow) |
+| `clickTh` | Click-through enabled |
+| `multiShot` | Multi-shot (rapid-fire) enabled |
+
+**Modifier bitmask values** (test with bitwise AND):
+
+| Modifier | Value | Hex |
+|----------|-------|-----|
+| Shift | 131072 | 0x20000 |
+| Control | 262144 | 0x40000 |
+| Option | 524288 | 0x80000 |
+| Command | 1048576 | 0x100000 |
+
+**Example decoded values from a working config:**
+
+| Setting | hotkeyMod | Decoded |
+|---------|-----------|---------|
+| Global (Ctrl+Shift+Arrow) | 10879235 | Shift + Control |
+| Chrome (Cmd+Option+Arrow) | 12058920 | Option + Command |
+
+> **Note:** The `hotkeyMod` values include additional macOS event flag bits beyond just the modifier keys. To check if a modifier is present, use bitwise AND: `if hotkeyMod & 262144: # Control is pressed`
+
+### Limitations
+
+- **No official config file format**: BetterMouse doesn't document its plist structure
+- **Binary nested plists**: The config contains nested binary plists that require recursive decoding
+- **Event-driven detection**: Buttons must be physically used before they appear in config
+- **Version changes**: Config structure may change between BetterMouse versions
+
+For reliable automation, use BetterMouse's built-in **Save/Load Config** feature (in the app menu) rather than directly editing the plist.
 
 ---
 

@@ -1,37 +1,59 @@
-# Fixing Claude Code: Native Install vs Bun/NPM Conflict
+# Claude Code Native Install Fix
+
+## Quick Fix
+
+If `claude --version` shows an old version after installing natively:
+
+```bash
+# 1. Use explicit path in aliases (~/.zshrc)
+alias cc='~/.local/bin/claude --dangerously-skip-permissions'
+
+# 2. Update alias uses native updater
+alias uca='~/.local/bin/claude update'
+
+# 3. Remove stale symlinks
+rm ~/.bun/bin/claude 2>/dev/null
+
+# 4. Apply changes
+source ~/.zshrc
+```
+
+---
 
 ## The Problem
 
-After installing Claude Code natively (via `curl`), you still see the old version and get "Auto-update failed" errors. This happens because your shell finds an older bun/npm-installed version first in your PATH.
-
-Command to install Claude Code natively is:
+After installing Claude Code via the native installer:
 
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash
 ```
 
+You might still see an old version. This happens when a previous bun/npm installation appears earlier in your PATH.
+
 **Symptoms:**
 - `claude --version` shows old version despite fresh native install
-- "Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code" message
+- "Auto-update failed" errors
 - `claude doctor` shows "Currently running: unknown"
+
+---
 
 ## Diagnosis
 
-Check where your `claude` commands point:
-
 ```bash
-which claude
+which claude                    # Should be ~/.local/bin/claude
 ls -la ~/.local/bin/claude      # Native install (correct)
-ls -la ~/.bun/bin/claude        # Bun install (stale)
+ls -la ~/.bun/bin/claude        # Bun install (stale, if exists)
 ```
 
-If `which claude` returns a bun or npm path instead of `~/.local/bin/claude`, that's the conflict.
+If `which claude` returns a bun or npm path, your shell is finding the wrong binary.
+
+---
 
 ## The Fix
 
 ### 1. Update aliases to use explicit paths
 
-In your `~/.zshrc` (or `~/.bashrc`), change any `claude` aliases to use the full path:
+In `~/.zshrc` or `~/.bashrc`:
 
 ```bash
 # Before (finds wrong binary via PATH)
@@ -39,10 +61,6 @@ alias cc='claude --dangerously-skip-permissions'
 
 # After (explicitly uses native install)
 alias cc='~/.local/bin/claude --dangerously-skip-permissions'
-
-# Others:
-alias gmi='gemini --yolo --model gemini-3-pro-preview'
-alias cod='codex --dangerously-bypass-approvals-and-sandbox --search -m gpt-5.2 -c model_reasoning_effort="xhigh" -c model_reasoning_summary_format=experimental'
 ```
 
 ### 2. Update your update alias
@@ -64,26 +82,26 @@ rm ~/.bun/bin/claude 2>/dev/null
 rm ~/.bun/install/global/node_modules/.bin/claude 2>/dev/null
 ```
 
-### 4. Apply changes
+### 4. Verify
 
 ```bash
-source ~/.zshrc
+~/.local/bin/claude --version   # Should show latest version
 ```
 
-## Verify
-
-```bash
-~/.local/bin/claude --version  # Should show latest version
-```
+---
 
 ## What About Codex and Gemini CLI?
 
 | Tool | Native Binary? | Recommendation |
-|------|----------------|----------------|
-| Claude Code | ✅ Yes | Use native installer (`~/.local/bin/claude`) |
-| Codex | ✅ Yes (Rust) | Keep bun—it delivers the native binary anyway |
-| Gemini CLI | ❌ No | Keep bun—no native option exists yet |
+|:-----|:---------------|:---------------|
+| Claude Code | Yes | Use native installer (`~/.local/bin/claude`) |
+| Codex | Yes (Rust) | Keep bun; it delivers the native binary anyway |
+| Gemini CLI | No | Keep bun; no native option exists yet |
 
-**Codex:** The bun/npm package is just a delivery mechanism. Your actual binary is a 40MB Mach-O arm64 executable at `~/.bun/install/global/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex`. You're already running native code.
+**Codex:** The bun/npm package is just a delivery mechanism. Your actual binary is a 40MB Mach-O arm64 executable at `~/.bun/install/global/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex`.
 
-**Gemini CLI:** Users have [requested a native installer](https://github.com/google-gemini/gemini-cli/discussions/1640), but it doesn't exist yet. Homebrew still requires Node.js as a dependency. Stick with bun.
+**Gemini CLI:** Users have [requested a native installer](https://github.com/google-gemini/gemini-cli/discussions/1640), but it doesn't exist yet. Homebrew still requires Node.js as a dependency.
+
+---
+
+*Last updated: January 2026*

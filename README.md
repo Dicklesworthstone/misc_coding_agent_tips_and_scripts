@@ -1,141 +1,200 @@
 # Misc Coding Agent Tips and Scripts
 
-A collection of guides, tips, and configuration scripts for AI coding agents, development tools, and system setups. This repository documents best practices, workarounds, and configurations discovered through real-world usage of AI assistants and development environments.
+Practical guides for AI coding agents, terminal customization, and development tooling. Each guide documents a real problem encountered during daily work, the solution that fixed it, and copy-paste configurations to replicate the setup.
 
-## 📚 Contents
+## Quick Reference
 
-### 🤖 AI Agent Configuration & Safety
+| Guide | Problem Solved | Time to Set Up |
+|:------|:---------------|:---------------|
+| [Destructive Git Command Protection](#destructive-git-command-protection) | AI agent ran `git checkout --` and destroyed uncommitted work | 5 min |
+| [Host-Aware Terminal Colors](#host-aware-color-themes) | Can't tell which terminal is connected to production | 5-15 min |
+| [MX Master Tab Switching](#mx-master-thumbwheel-tab-switching) | Thumbwheel does horizontal scroll instead of something useful | 10 min |
+| [Claude Code Native Install Fix](#claude-code-native-install-fix) | `claude --version` shows old version after native install | 5 min |
+| [Beads Setup](#beads-setup) | Worktree errors when syncing Beads | 5 min |
+| [Moonlight Streaming](#moonlight-streaming-configuration) | Remote desktop to Linux workstation with AV1 encoding | 30 min |
 
-#### [Destructive Git Command Protection](DESTRUCTIVE_GIT_COMMAND_CLAUDE_HOOKS_SETUP.md)
-**Critical safety hook for Claude Code to prevent data loss**
+---
 
-After an AI agent accidentally destroyed hours of uncommitted work by running `git checkout --` on multiple files, this guide was created to provide a mechanical enforcement system to prevent such incidents.
+## AI Agent Safety
 
-**What it does:**
-- Blocks destructive git/filesystem commands before execution
-- Uses Claude Code's PreToolUse hook system
-- Protects against `git checkout --`, `git reset --hard`, `rm -rf`, and more
-- Includes automated installation script for project-local or global setup
+### Destructive Git Command Protection
 
-**Key Features:**
-- Runs before bash commands execute (can block dangerous operations)
-- Provides clear feedback explaining why commands are blocked
-- Maintains allowlist for safe command variants
-- Zero false positives on normal workflows
+> **Origin story:** An AI agent ran `git checkout --` on files containing hours of uncommitted work from a parallel coding session. The files were recovered via `git fsck --lost-found`, but this prompted creating a mechanical enforcement system.
 
-**Quick Install:**
+A Python hook for Claude Code that intercepts Bash commands and blocks destructive operations before they execute.
 
-See the [full installation guide](DESTRUCTIVE_GIT_COMMAND_CLAUDE_HOOKS_SETUP.md#automated-setup-script) for the automated setup script that can be used for both project-local and global installation.
+**Blocked commands:**
 
-> ⚠️ **Important:** Restart Claude Code after installation for hooks to take effect.
+| Command | Why it's dangerous |
+|:--------|:-------------------|
+| `git checkout -- <files>` | Discards uncommitted changes permanently |
+| `git reset --hard` | Destroys all uncommitted work |
+| `git clean -f` | Deletes untracked files |
+| `git push --force` | Overwrites remote history |
+| `rm -rf` (non-temp paths) | Recursive deletion |
 
-### 🔧 Development Tools & Setup
+**How it works:** Claude Code's `PreToolUse` hook system runs the guard script before each Bash command. The script pattern-matches against known destructive commands and returns a deny decision with an explanation. Safe variants (like `git checkout -b`, `git clean -n`, `rm -rf /tmp/...`) are allowlisted.
 
-#### [Beads Setup Guide](BEADS_SETUP.md)
-**Configuration guide for Beads project management tool**
+<details>
+<summary><strong>Quick install</strong></summary>
 
-Comprehensive setup instructions for using Beads in a repository, including sync branch configuration, common commands, and troubleshooting.
+See the [full guide](DESTRUCTIVE_GIT_COMMAND_CLAUDE_HOOKS_SETUP.md) for the automated installer. After running it:
 
-**Key Topics:**
-- Initial setup with dedicated sync branches to avoid worktree conflicts
-- Sync commands reference (`bd sync`, `bd sync --from-main`, etc.)
-- Configuration management (`bd config`)
-- Troubleshooting worktree errors and sync issues
-- Health checks with `bd doctor`
+```bash
+# Restart Claude Code for hooks to take effect
+```
 
-**Quick Setup:**
+Test that it works:
+```bash
+echo '{"tool_name": "Bash", "tool_input": {"command": "git checkout -- file.txt"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+# Should output: permissionDecision: deny
+```
+
+</details>
+
+**[Full guide →](DESTRUCTIVE_GIT_COMMAND_CLAUDE_HOOKS_SETUP.md)**
+
+---
+
+## Terminal Customization
+
+### Host-Aware Color Themes
+
+When you have terminals open to multiple servers, color-coding each connection prevents accidentally running commands on the wrong machine.
+
+```
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│  PURPLE         │ │  AMBER          │ │  CRIMSON        │
+│  dev-server     │ │  staging        │ │  production     │
+└─────────────────┘ └─────────────────┘ └─────────────────┘
+```
+
+**Two approaches:**
+
+| | Ghostty/Shell | WezTerm/Lua |
+|:--|:--------------|:------------|
+| Setup time | ~5 min | ~15 min |
+| Works in | Any terminal with OSC support | WezTerm only |
+| Tab bar theming | No | Yes |
+| Gradient backgrounds | No | Yes |
+| Session persistence | No | Yes (survives disconnects) |
+
+<details>
+<summary><strong>Ghostty quick setup</strong></summary>
+
+Add to `~/.zshrc`:
+
+```bash
+my-server() {
+  printf '\e]11;#1a0d1a\a\e]10;#e8d4f8\a\e]12;#bb9af7\a'  # purple theme
+  ssh ubuntu@my-server.example.com "$@"
+  printf '\e]111\a\e]110\a\e]112\a\e]104\a'               # reset on exit
+}
+```
+
+The `printf` commands send OSC escape sequences that change terminal colors. `\e]11;#1a0d1a\a` sets background; `\e]111\a` resets it.
+
+</details>
+
+**[Full guide →](GUIDE_TO_SETTING_UP_HOST_AWARE_COLOR_THEMES_FOR_GHOSTTY_AND_WEZTERM.md)**
+
+---
+
+### MX Master Thumbwheel Tab Switching
+
+The horizontal thumbwheel on Logitech MX Master mice is designed for horizontal scrolling, which most developers rarely use. This guide repurposes it for tab switching across terminals, editors, and browsers.
+
+**Setup:**
+
+1. Install [BetterMouse](https://better-mouse.com) ($10 one-time)
+2. Map thumbwheel to `Ctrl+Shift+Arrow`:
+   ```
+   Thumbwheel <<  →  Ctrl+Shift+Left
+   Thumbwheel >>  →  Ctrl+Shift+Right
+   ```
+3. Add keybindings to each app (WezTerm, Ghostty, VS Code, etc.)
+
+<details>
+<summary><strong>Why Ctrl+Shift+Arrow?</strong></summary>
+
+| Shortcut | Problem |
+|:---------|:--------|
+| `Ctrl+Tab` | Can't rebind in Chrome |
+| `Cmd+[` / `Cmd+]` | Used for navigation history |
+| `Cmd+Shift+[` / `Cmd+Shift+]` | Used for tab switching in some apps, but not universal |
+| `Ctrl+Shift+Arrow` | Rarely used as a default; easy to rebind everywhere |
+
+</details>
+
+**[Full guide →](GUIDE_TO_SETTING_UP_YOUR_MX_MASTER_MOUSE_FOR_DEV_WORK_ON_MAC.md)**
+
+---
+
+## Development Tools
+
+### Claude Code Native Install Fix
+
+After installing Claude Code via `curl -fsSL https://claude.ai/install.sh | bash`, you might still see the old version if a previous bun/npm installation is earlier in your PATH.
+
+**Symptoms:**
+- `claude --version` shows old version
+- "Auto-update failed" errors
+- `claude doctor` shows "Currently running: unknown"
+
+**Fix:**
+
+```bash
+# Use explicit path in aliases
+alias cc='~/.local/bin/claude --dangerously-skip-permissions'
+
+# Update alias uses native updater
+alias uca='~/.local/bin/claude update'
+
+# Remove stale symlinks
+rm ~/.bun/bin/claude 2>/dev/null
+```
+
+**[Full guide →](SETTING_UP_CLAUDE_CODE_NATIVE.md)**
+
+---
+
+### Beads Setup
+
+[Beads](https://github.com/beads-project/beads) uses git worktrees for sync operations. If your `sync.branch` is set to your current branch, you'll get:
+
+```
+fatal: 'main' is already checked out at '/path/to/repo'
+```
+
+**Fix:** Create a dedicated sync branch:
+
 ```bash
 git branch beads-sync main
 git push -u origin beads-sync
 bd config set sync.branch beads-sync
 ```
 
-#### [Claude Code Native Install Fix](SETTING_UP_CLAUDE_CODE_NATIVE.md)
-**Resolving PATH conflicts between native and bun/npm installations**
+**[Full guide →](BEADS_SETUP.md)**
 
-After installing Claude Code natively via `curl`, users may encounter version conflicts when older bun/npm installations remain in PATH. This guide diagnoses and fixes the issue.
+---
 
-**Symptoms:**
-- `claude --version` shows old version despite fresh install
-- "Auto-update failed" errors
-- `claude doctor` shows "Currently running: unknown"
+## Remote Desktop
 
-**The Fix:**
-- Use explicit paths in shell aliases (`~/.local/bin/claude`)
-- Update the update alias to use native updater
-- Remove stale symlinks from bun/npm installations
-- Comparison of native vs package manager installs for Claude Code, Codex, and Gemini CLI
+### Moonlight Streaming Configuration
 
-#### [MX Master Thumbwheel Tab Switching](GUIDE_TO_SETTING_UP_YOUR_MX_MASTER_MOUSE_FOR_DEV_WORK_ON_MAC.md)
-**Repurpose your MX Master's thumbwheel for ergonomic tab navigation**
+Setup for streaming from a Linux workstation (Hyprland/Wayland, dual RTX 4090) to a Mac client using Moonlight with AV1 encoding.
 
-The horizontal thumbwheel on the Logitech MX Master series is designed for horizontal scrolling, but most developers rarely need that. This guide shows how to turn it into a tab-switching tool across your entire development environment.
+| Component | Configuration |
+|:----------|:--------------|
+| Server | Sunshine on Hyprland with NVENC |
+| Client | Custom Moonlight build with AV1 |
+| Resolution | 3072x1728 @ 30fps |
+| Codec | AV1 (requires RTX 40-series) |
 
-**What it covers:**
-- BetterMouse configuration ($10 one-time tool for advanced mouse control)
-- Keybindings for WezTerm, Ghostty, Zed, VS Code, iTerm2, Safari, Chrome
-- Why `Ctrl+Shift+Arrow` was chosen (conflict analysis)
-- Per-app exceptions for browsers that don't support custom keybindings
-- Remote server considerations (standard SSH vs WezTerm multiplexing)
+<details>
+<summary><strong>Shell aliases</strong></summary>
 
-**Quick Setup:**
-```
-BetterMouse → Buttons tab:
-  Thumbwheel <<  →  Ctrl+Shift+Left
-  Thumbwheel >>  →  Ctrl+Shift+Right
-```
-
-Then add the corresponding keybinding to each app you use.
-
-#### [Host-Aware Color Themes for Ghostty & WezTerm](GUIDE_TO_SETTING_UP_HOST_AWARE_COLOR_THEMES_FOR_GHOSTTY_AND_WEZTERM.md)
-**Automatically color-code terminal sessions by remote host**
-
-You have terminals open to 4 different servers. Which one is production? This guide shows how to make each server visually distinct: purple for dev, amber for staging, emerald for CI, crimson for production.
-
-**Two approaches:**
-| | Ghostty (Shell) | WezTerm (Lua) |
-|--|-----------------|---------------|
-| Setup time | ~5 min | ~15 min |
-| Works in | Any modern terminal | WezTerm only |
-| Tab bar theming | No | Yes |
-| Session persistence | No | Yes (survives disconnects) |
-
-**What it covers:**
-- OSC escape sequences explained (how terminals change colors dynamically)
-- Complete copy-paste configurations for 4 servers
-- WezTerm multiplexing (persistent sessions that survive network drops)
-- Designing your own color schemes with gradients
-- Troubleshooting (Ctrl+C cleanup, color reset issues)
-
-**Quick Setup (Ghostty):**
-```bash
-# Add to ~/.zshrc - colors change on connect, reset on exit
-my-server() {
-  printf '\e]11;#1a0d1a\a\e]10;#e8d4f8\a\e]12;#bb9af7\a'  # purple theme
-  ssh ubuntu@my-server.example.com "$@"
-  printf '\e]111\a\e]110\a\e]112\a\e]104\a'               # reset
-}
-```
-
-#### [Moonlight Streaming Configuration](MOONLIGHT_CONFIG_DOC.md)
-**Complete guide for remote desktop streaming with Moonlight and Sunshine**
-
-Documents a working setup for streaming from a powerful Linux workstation (threadripperje with dual RTX 4090s) to a Mac client using Moonlight with AV1 encoding.
-
-**Configuration:**
-- Server: Sunshine on Hyprland (Wayland) with NVENC encoding
-- Client: Custom Moonlight build with AV1 support
-- Resolution: 3072x1728@30fps via AV1 codec
-- Clipboard sync scripts and desktop switching utilities
-
-**Common Issues Covered:**
-- Display sleep/wake problems
-- GPU AV1 support errors
-- Fullscreen escape methods
-- Clipboard synchronization workarounds
-- NVIDIA persistence mode setup
-
-**Quick Reference Commands:**
 ```bash
 ml      # Start Moonlight streaming
 trj     # SSH into remote server
@@ -144,61 +203,35 @@ cptl    # Copy clipboard to Linux
 cpfm    # Copy clipboard from Mac
 ```
 
-## 🎯 Use Cases
+</details>
 
-This repository is useful for:
+**Common issues:** Display sleep disconnects GPU from DRM, causing "GPU doesn't support AV1" errors. Fix: enable NVIDIA persistence mode (`nvidia-smi -pm 1`) and disable hypridle.
 
-- **AI Agent Users**: Configure safety guardrails and optimize tool usage
-- **DevOps Engineers**: Learn from real-world tool configurations and workarounds
-- **Remote Workers**: Set up high-performance remote desktop streaming
-- **Development Teams**: Implement project management tools like Beads
-- **System Administrators**: Document complex multi-tool configurations
-
-## 🚀 Quick Start
-
-1. **Browse the guides** in the table of contents above
-2. **Identify the tools** you're using (Claude Code, Beads, Moonlight, etc.)
-3. **Follow the relevant guide** for setup and configuration
-4. **Check troubleshooting sections** if you encounter issues
-
-## 🛡️ Safety First
-
-If you use AI coding agents, **start with the Destructive Git Command Protection guide**. The hook system can prevent data loss from accidental destructive commands. This is especially important if multiple agents or developers work on the same codebase.
-
-## 📖 Documentation Style
-
-Each guide follows a consistent structure:
-
-- **Problem Statement**: What issue does this solve?
-- **Quick Reference**: Tables and commands for fast lookup
-- **Configuration**: Complete setup instructions
-- **Troubleshooting**: Common issues and solutions
-- **Examples**: Real-world usage patterns
-
-## ⚙️ Tech Stack
-
-Tools and technologies covered:
-
-- **AI Agents**: Claude Code, Codex, Gemini CLI
-- **Version Control**: Git, with safety hooks and best practices
-- **Project Management**: Beads
-- **Remote Desktop**: Moonlight, Sunshine, Hyprland
-- **Package Managers**: bun, npm, native installers
-- **Operating Systems**: macOS, Linux (Ubuntu/Arch)
-- **Hardware**: NVIDIA GPUs, multi-monitor setups, Logitech MX Master mice
-- **Utilities**: BetterMouse, Sunshine/Moonlight
-
-## 📝 License
-
-This repository contains documentation and configuration files. Use freely for personal or commercial projects.
-
-## 🔗 Related Resources
-
-- [Claude Code Documentation](https://docs.anthropic.com/claude/docs/claude-code)
-- [Beads Project](https://github.com/beads-project/beads)
-- [Moonlight Game Streaming](https://moonlight-stream.org/)
-- [Sunshine Streaming Server](https://github.com/LizardByte/Sunshine)
+**[Full guide →](MOONLIGHT_CONFIG_DOC.md)**
 
 ---
 
-*Last Updated: January 2026*
+## Tech Stack
+
+| Category | Tools |
+|:---------|:------|
+| AI Agents | Claude Code, Codex, Gemini CLI |
+| Terminals | WezTerm, Ghostty, iTerm2 |
+| Editors | VS Code, Zed |
+| Version Control | Git (with safety hooks) |
+| Remote Desktop | Moonlight, Sunshine |
+| Package Managers | bun, npm, native installers |
+| Hardware | NVIDIA GPUs, Logitech MX Master |
+| OS | macOS, Linux (Ubuntu, Arch) |
+
+## Related
+
+- [Claude Code Documentation](https://docs.anthropic.com/en/docs/claude-code)
+- [Beads Project](https://github.com/beads-project/beads)
+- [Moonlight](https://moonlight-stream.org/) / [Sunshine](https://github.com/LizardByte/Sunshine)
+- [BetterMouse](https://better-mouse.com)
+- [WezTerm](https://wezfurlong.org/wezterm/) / [Ghostty](https://ghostty.org)
+
+---
+
+*Last updated: January 2026*

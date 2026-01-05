@@ -66,6 +66,57 @@ After installing Claude Code natively via `curl`, users may encounter version co
 - Remove stale symlinks from bun/npm installations
 - Comparison of native vs package manager installs for Claude Code, Codex, and Gemini CLI
 
+#### [MX Master Thumbwheel Tab Switching](GUIDE_TO_SETTING_UP_YOUR_MX_MASTER_MOUSE_FOR_DEV_WORK_ON_MAC.md)
+**Repurpose your MX Master's thumbwheel for ergonomic tab navigation**
+
+The horizontal thumbwheel on the Logitech MX Master series is designed for horizontal scrolling, but most developers rarely need that. This guide shows how to turn it into a tab-switching tool across your entire development environment.
+
+**What it covers:**
+- BetterMouse configuration ($10 one-time tool for advanced mouse control)
+- Keybindings for WezTerm, Ghostty, Zed, VS Code, iTerm2, Safari, Chrome
+- Why `Ctrl+Shift+Arrow` was chosen (conflict analysis)
+- Per-app exceptions for browsers that don't support custom keybindings
+- Remote server considerations (standard SSH vs WezTerm multiplexing)
+
+**Quick Setup:**
+```
+BetterMouse → Buttons tab:
+  Thumbwheel <<  →  Ctrl+Shift+Left
+  Thumbwheel >>  →  Ctrl+Shift+Right
+```
+
+Then add the corresponding keybinding to each app you use.
+
+#### [Host-Aware Color Themes for Ghostty & WezTerm](GUIDE_TO_SETTING_UP_HOST_AWARE_COLOR_THEMES_FOR_GHOSTTY_AND_WEZTERM.md)
+**Automatically color-code terminal sessions by remote host**
+
+You have terminals open to 4 different servers. Which one is production? This guide shows how to make each server visually distinct: purple for dev, amber for staging, emerald for CI, crimson for production.
+
+**Two approaches:**
+| | Ghostty (Shell) | WezTerm (Lua) |
+|--|-----------------|---------------|
+| Setup time | ~5 min | ~15 min |
+| Works in | Any modern terminal | WezTerm only |
+| Tab bar theming | No | Yes |
+| Session persistence | No | Yes (survives disconnects) |
+
+**What it covers:**
+- OSC escape sequences explained (how terminals change colors dynamically)
+- Complete copy-paste configurations for 4 servers
+- WezTerm multiplexing (persistent sessions that survive network drops)
+- Designing your own color schemes with gradients
+- Troubleshooting (Ctrl+C cleanup, color reset issues)
+
+**Quick Setup (Ghostty):**
+```bash
+# Add to ~/.zshrc - colors change on connect, reset on exit
+my-server() {
+  printf '\e]11;#1a0d1a\a\e]10;#e8d4f8\a\e]12;#bb9af7\a'  # purple theme
+  ssh ubuntu@my-server.example.com "$@"
+  printf '\e]111\a\e]110\a\e]112\a\e]104\a'               # reset
+}
+```
+
 #### [Moonlight Streaming Configuration](MOONLIGHT_CONFIG_DOC.md)
 **Complete guide for remote desktop streaming with Moonlight and Sunshine**
 
@@ -134,7 +185,8 @@ Tools and technologies covered:
 - **Remote Desktop**: Moonlight, Sunshine, Hyprland
 - **Package Managers**: bun, npm, native installers
 - **Operating Systems**: macOS, Linux (Ubuntu/Arch)
-- **Hardware**: NVIDIA GPUs, multi-monitor setups
+- **Hardware**: NVIDIA GPUs, multi-monitor setups, Logitech MX Master mice
+- **Utilities**: BetterMouse, Sunshine/Moonlight
 
 ## 📝 License
 
@@ -149,4 +201,4 @@ This repository contains documentation and configuration files. Use freely for p
 
 ---
 
-*Last Updated: December 2025*
+*Last Updated: January 2026*

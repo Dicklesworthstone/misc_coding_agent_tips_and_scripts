@@ -95,11 +95,11 @@ This works well because:
 2. Go to the **Buttons** tab
 3. Scroll down to find the thumbwheel settings:
 
-| Gesture | Action | Enabled | Repeat |
-|---------|--------|---------|--------|
-| Thumbwheel ↓ | Smart Zoom | ☑ | n/a |
-| Thumbwheel << | `⇧⌃ ←` | ☑ | ☐ |
-| Thumbwheel >> | `⇧⌃ →` | ☑ | ☐ |
+| Gesture | Action | Click-through | Multi-shot |
+|---------|--------|---------------|------------|
+| Thumbwheel ↓ | Smart Zoom | ☐ | n/a |
+| Thumbwheel << | `⇧⌃ ←` | ☐ | ☐ |
+| Thumbwheel >> | `⇧⌃ →` | ☐ | ☐ |
 
 4. **To set the left scroll (Thumbwheel <<):**
    - Click the dropdown next to "Thumbwheel <<"
@@ -111,8 +111,8 @@ This works well because:
    - Should display as `⇧⌃ →`
 
 6. **Important checkbox settings:**
-   - First checkbox (☑): Enables the mapping; keep this checked
-   - Second checkbox (☐): "Repeat while held"; keep this **unchecked** to prevent rapid-fire tab switching
+   - **Click-through** (☐): Passes clicks to underlying windows; leave **unchecked** for tab switching
+   - **Multi-shot** (☐): Triggers the action repeatedly (rapid-fire); keep this **unchecked** to prevent switching multiple tabs per scroll
 
 ### Step 3: Verify It's Working
 
@@ -344,7 +344,7 @@ When you connect to a WezTerm-multiplexed domain, you're essentially opening a w
 |-------|----------|
 | BetterMouse not running | Look for icon in menu bar; relaunch if missing |
 | Permissions missing | System Settings → Privacy & Security → Accessibility → BetterMouse ☑ |
-| Mapping disabled | BetterMouse → Buttons → Ensure first checkbox is checked |
+| Mapping not set | BetterMouse → Buttons → Verify thumbwheel action is set to a keystroke |
 | Mouse not detected | Try unplugging and reconnecting; check BetterMouse device list |
 
 ### Works in some apps, not others
@@ -359,7 +359,7 @@ When you connect to a WezTerm-multiplexed domain, you're essentially opening a w
 
 | Check | Solution |
 |-------|----------|
-| Repeat enabled | BetterMouse → Buttons → Uncheck second checkbox for thumbwheel |
+| Multi-shot enabled | BetterMouse → Buttons → Uncheck "Multi-shot" for thumbwheel gestures |
 | Sensitivity too high | BetterMouse → Scroll → Reduce thumbwheel sensitivity |
 
 ### Conflict with text selection

@@ -66,6 +66,8 @@ The `PreToolUse` hook receives the full tool input as JSON via stdin and can:
 
 ## Commands Blocked
 
+**Note:** Absolute paths are normalized before matching. `/bin/rm`, `/usr/bin/rm`, `/usr/bin/git`, etc. are all detected and blocked the same as their bare command equivalents.
+
 | Command Pattern | Why It's Dangerous |
 |-----------------|-------------------|
 | `git checkout -- <files>` | Discards uncommitted changes permanently |
@@ -77,6 +79,7 @@ The `PreToolUse` hook receives the full tool input as JSON via stdin and can:
 | `git push -f` | Same as --force |
 | `git branch -D` | Force-deletes branch without merge check |
 | `rm -rf` (non-temp paths) | Recursive file deletion (except `/tmp`, `/var/tmp`, `$TMPDIR`) |
+| `/bin/rm -rf`, `/usr/bin/rm -rf` | Same as above - absolute paths are normalized |
 | `git stash drop` | Permanently deletes stashed changes |
 | `git stash clear` | Deletes ALL stashed changes |
 
@@ -130,6 +133,50 @@ echo '{"tool_name": "Bash", "tool_input": {"command": "rm -rf /some/path"}}' | \
 # rm -rf on temp path should be allowed (no output)
 echo '{"tool_name": "Bash", "tool_input": {"command": "rm -rf /tmp/test-dir"}}' | \
   python3 .claude/hooks/git_safety_guard.py
+
+# ABSOLUTE PATH TESTS - these should all be BLOCKED (previously bypassed the guard!)
+# /bin/rm should be blocked
+echo '{"tool_name": "Bash", "tool_input": {"command": "/bin/rm -rf /home/user"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# /usr/bin/rm should be blocked
+echo '{"tool_name": "Bash", "tool_input": {"command": "/usr/bin/rm -rf /some/path"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# /usr/bin/git should be blocked
+echo '{"tool_name": "Bash", "tool_input": {"command": "/usr/bin/git reset --hard"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# sudo with absolute path should be blocked (pattern finds 'rm -rf' via re.search)
+echo '{"tool_name": "Bash", "tool_input": {"command": "sudo /bin/rm -rf /important"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# Absolute path to temp dir should be ALLOWED (no output)
+echo '{"tool_name": "Bash", "tool_input": {"command": "/bin/rm -rf /tmp/test"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# REGRESSION TEST: Paths containing 'rm' should NOT be corrupted
+# This command should be BLOCKED (not allowed), but the path must stay intact
+# Bug: old code would corrupt /home/rm-backup/ to rm-backup/
+echo '{"tool_name": "Bash", "tool_input": {"command": "rm -rf /home/rm-backup/"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+# Expected: BLOCKED with "Command: rm -rf /home/rm-backup/" (path preserved)
+
+# REGRESSION TEST: Path arguments ending in bin/rm should NOT be corrupted
+# Bug: old code would corrupt /home/user/bin/rm to rm
+echo '{"tool_name": "Bash", "tool_input": {"command": "rm /home/user/bin/rm"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+# Expected: ALLOWED (rm without -rf on single file is OK, path must stay intact)
+
+# REGRESSION TEST: git clean -fn (dry run) should be ALLOWED
+# Bug: old code only matched -n at specific position, not -fn or -nf
+echo '{"tool_name": "Bash", "tool_input": {"command": "git clean -fn"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+# Expected: ALLOWED (no output) - dry run is safe regardless of flag order
+
+echo '{"tool_name": "Bash", "tool_input": {"command": "git clean -nf"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+# Expected: ALLOWED (no output) - same as above, different order
 ```
 
 ## Important Notes
@@ -294,8 +341,8 @@ SAFE_PATTERNS = [
     # Unstaging is safe, BUT NOT if --worktree/-W is also present (that modifies working tree)
     r"git\s+restore\s+--staged\s+(?!.*--worktree)(?!.*-W\b)",  # Unstaging only (safe)
     r"git\s+restore\s+-S\s+(?!.*--worktree)(?!.*-W\b)",        # Unstaging short form (safe)
-    r"git\s+clean\s+-n",                 # Dry run
-    r"git\s+clean\s+--dry-run",          # Dry run
+    r"git\s+clean\s+-[a-z]*n[a-z]*",     # Dry run (matches -n, -fn, -nf, -xnf, etc.)
+    r"git\s+clean\s+--dry-run",          # Dry run (long form)
     # Allow rm -rf on temp directories (designed for ephemeral data)
     # Note: [rR] because both -r and -R mean recursive
     # Note: Must handle BOTH flag orderings: -rf/-Rf AND -fr/-fR
@@ -323,6 +370,42 @@ SAFE_PATTERNS = [
 ]
 
 
+def _normalize_absolute_paths(cmd):
+    """Normalize absolute paths to rm/git for consistent pattern matching.
+
+    Converts /bin/rm, /usr/bin/rm, /usr/local/bin/rm, etc. to just 'rm'.
+    Converts /usr/bin/git, /usr/local/bin/git, etc. to just 'git'.
+
+    IMPORTANT: Only normalizes at the START of the command string to avoid
+    corrupting paths that appear as arguments (e.g., 'rm /home/user/bin/rm').
+    Commands like 'sudo /bin/rm' are NOT normalized, but the destructive
+    patterns will still catch them via re.search finding 'rm -rf' in the string.
+
+    Examples:
+        /bin/rm -rf /foo -> rm -rf /foo
+        /usr/bin/git reset --hard -> git reset --hard
+        sudo /bin/rm -rf /foo -> sudo /bin/rm -rf /foo (unchanged, but still caught!)
+        rm /home/user/bin/rm -> rm /home/user/bin/rm (unchanged - it's an argument!)
+    """
+    if not cmd:
+        return cmd
+
+    result = cmd
+
+    # Normalize paths to rm/git ONLY at the start of the command
+    # This prevents corrupting paths that appear as arguments
+    # ^ - must be at start of string
+    # /(?:\S*/)* - zero or more path components (e.g., /usr/, /usr/local/)
+    # s?bin/rm - matches bin/rm or sbin/rm
+    # (?=\s|$) - must be followed by whitespace or end (complete token)
+    result = re.sub(r'^/(?:\S*/)*s?bin/rm(?=\s|$)', 'rm', result)
+
+    # Same for git
+    result = re.sub(r'^/(?:\S*/)*s?bin/git(?=\s|$)', 'git', result)
+
+    return result
+
+
 def main():
     try:
         input_data = json.load(sys.stdin)
@@ -340,6 +423,11 @@ def main():
     if tool_name != "Bash" or not isinstance(command, str) or not command:
         sys.exit(0)
 
+    # Store original for error messages, normalize for pattern matching
+    # This handles absolute paths like /bin/rm, /usr/bin/git, etc.
+    original_command = command
+    command = _normalize_absolute_paths(command)
+
     # Check if command matches any safe pattern first
     for pattern in SAFE_PATTERNS:
         if re.search(pattern, command):
@@ -356,7 +444,7 @@ def main():
                     "permissionDecisionReason": (
                         f"BLOCKED by git_safety_guard.py\n\n"
                         f"Reason: {reason}\n\n"
-                        f"Command: {command}\n\n"
+                        f"Command: {original_command}\n\n"
                         f"If this operation is truly needed, ask the user for explicit "
                         f"permission and have them run the command manually."
                     )
@@ -548,6 +636,7 @@ This silently replaced all those files with their last committed versions, erasi
 ---
 
 *Created: December 17, 2025*
-*Updated: January 3, 2026 - Fixed null input crash, non-string command crash, added rm -r -f separate flags and --recursive --force long options patterns, case sensitivity fixes, rm -Rf/-fR handling*
+*Updated: January 5, 2026 - **SECURITY FIX**: Added `_normalize_absolute_paths()` to block `/bin/rm`, `/usr/bin/rm`, `/usr/bin/git`, etc. Previously these absolute paths bypassed all pattern matching. Also preserves original command in error messages. **BUGFIX #1**: Normalization now ONLY applies at start of command string to prevent corrupting path arguments (e.g., `rm /home/user/bin/rm` stays intact). Commands like `sudo /bin/rm` still caught via re.search. **BUGFIX #2**: Fixed `git clean -fn` being incorrectly blocked - safe pattern now matches `-n` anywhere in flags, not just at specific position.*
+*Previously: January 3, 2026 - Fixed null input crash, non-string command crash, added rm -r -f separate flags and --recursive --force long options patterns, case sensitivity fixes, rm -Rf/-fR handling*
 *Project: Ultimate Bug Scanner*
 *Related: AGENTS.md, .claude/hooks/git_safety_guard.py*

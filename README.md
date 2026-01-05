@@ -115,6 +115,8 @@ The horizontal thumbwheel on Logitech MX Master mice is designed for horizontal 
    ```
 3. Add keybindings to each app (WezTerm, Ghostty, VS Code, etc.)
 
+**Companion script:** [`bettermouse_config.py`](bettermouse_config.py) — Export/import BetterMouse settings as JSON for backup or sharing. Run with `uv run bettermouse_config.py show` to view your current config.
+
 <details>
 <summary><strong>Why Ctrl+Shift+Arrow?</strong></summary>
 

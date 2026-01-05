@@ -306,6 +306,9 @@ def parse_gestures_to_table(table: Table, app_name: str, gestures, direction_nam
         if isinstance(item, dict) and 'Move' in item:
             if i + 1 < len(gesture_data):
                 dir_configs = gesture_data[i + 1]
+                if not isinstance(dir_configs, list):
+                    i += 1
+                    continue
                 j = 0
                 while j < len(dir_configs) - 1:
                     direction = dir_configs[j]

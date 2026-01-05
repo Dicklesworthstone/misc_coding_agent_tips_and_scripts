@@ -211,14 +211,14 @@ You connect to domain "contabo-vps"
 │ WezTerm's update-status event fires                                         │
 │              │                                                              │
 │              ▼                                                              │
-│ Lua code: domain = pane:get_domain_name()  →  "contabo-vps"                │
+│ Lua code: domain = pane:get_domain_name()  →  "contabo-vps"                 │
 │              │                                                              │
 │              ▼                                                              │
 │ Applies domain_colors["contabo-vps"]:                                       │
-│   • Background gradient: #1a0d1a → #2e1a2e → #3e163e                       │
-│   • Tab bar: purple active tab, dark inactive tabs                         │
-│   • Status badge: "󰒋 Contabo VPS" in purple                                │
-│   • Window title: "󰒋 Contabo VPS │ zsh"                                    │
+│   • Background gradient: #1a0d1a → #2e1a2e → #3e163e                        │
+│   • Tab bar: purple active tab, dark inactive tabs                          │
+│   • Status badge: "󰒋 Contabo VPS" in purple                                 │
+│   • Window title: "󰒋 Contabo VPS │ zsh"                                     │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 

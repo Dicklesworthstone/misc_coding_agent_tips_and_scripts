@@ -1,50 +1,98 @@
 # Destructive Git Command Protection for Claude Code
 
-## Why This Exists
+> On December 17, 2025, an AI agent ran `git checkout --` on files containing hours of uncommitted work from a parallel coding session. The files were recovered via `git fsck --lost-found`, but the incident made one thing clear: instructions in `AGENTS.md` don't prevent execution. This hook provides mechanical enforcement.
 
-On December 17, 2025, an AI agent (Claude) ran `git checkout --` on multiple files containing hours of uncommitted work from another agent (Codex). This destroyed the work instantly and silently. The files were eventually recovered from a dangling Git object, but this incident revealed a critical gap: **AI agents can execute destructive commands without understanding the consequences**.
+## Quick Install
 
-The `AGENTS.md` file already forbade such commands, but instructions alone don't prevent execution. This hook provides **mechanical enforcement** - the command is blocked before it can run.
+```bash
+# Project-local (protects only this project)
+./install-claude-git-guard.sh
 
-## What Was Created
+# Global (protects all projects)
+./install-claude-git-guard.sh --global
 
-Two files in the Ultimate Bug Scanner project:
-
+# Restart Claude Code after installation
 ```
-ultimate_bug_scanner/
-├── .claude/
-│   ├── settings.json          # Hook configuration
-│   └── hooks/
-│       └── git_safety_guard.py  # The guard script
-```
+
+See [Automated Setup Script](#automated-setup-script) below for the full installer.
+
+---
+
+## What Gets Blocked
+
+| Command | Why |
+|:--------|:----|
+| `git checkout -- <files>` | Discards uncommitted changes permanently |
+| `git restore <files>` | Same effect as `checkout --` (newer syntax) |
+| `git reset --hard` | Destroys all uncommitted work |
+| `git reset --merge` | Can lose uncommitted changes |
+| `git clean -f` | Deletes untracked files permanently |
+| `git push --force` / `-f` | Overwrites remote history |
+| `git branch -D` | Force-deletes without merge check |
+| `rm -rf` (non-temp paths) | Recursive deletion |
+| `git stash drop` / `clear` | Permanently deletes stashed changes |
+
+**Note:** Absolute paths like `/bin/rm`, `/usr/bin/git` are normalized before matching.
+
+## What Gets Allowed
+
+These patterns are allowlisted even if they partially match blocked patterns:
+
+| Command | Why it's safe |
+|:--------|:--------------|
+| `git checkout -b <branch>` | Creates new branch, doesn't touch files |
+| `git checkout --orphan` | Creates orphan branch |
+| `git restore --staged` | Only unstages; doesn't discard working changes |
+| `git clean -n` / `--dry-run` | Preview only |
+| `rm -rf /tmp/...` | Temp directories are ephemeral by design |
+| `rm -rf /var/tmp/...` | System temp directory |
+| `rm -rf $TMPDIR/...` | User's temp directory |
+
+---
 
 ## How It Works
 
-### Claude Code Hooks System
+Claude Code's hook system intercepts tool calls at various points:
 
-Claude Code has a hooks system that can intercept tool calls at various lifecycle points:
+| Hook | When it runs | Can block? |
+|:-----|:-------------|:-----------|
+| `PreToolUse` | Before tool executes | Yes |
+| `PostToolUse` | After tool completes | No |
+| `Notification` | On status changes | No |
 
-- **PreToolUse** - Runs before a tool executes (can block)
-- **PostToolUse** - Runs after a tool completes
-- **Notification** - Runs on status changes
+This guard uses `PreToolUse` on the `Bash` tool. The hook receives the command as JSON via stdin:
 
-The `PreToolUse` hook receives the full tool input as JSON via stdin and can:
-1. **Allow** the command (exit 0, no output)
-2. **Block** the command (exit 0 with JSON containing `permissionDecision: "deny"`)
-3. **Ask the user** (exit 0 with JSON containing `permissionDecision: "ask"`)
+```json
+{"tool_name": "Bash", "tool_input": {"command": "git checkout -- file.txt"}}
+```
 
-### The Guard Script
+The script checks against destructive patterns. If matched, it returns:
 
-`git_safety_guard.py` is a Python script that:
+```json
+{
+  "hookSpecificOutput": {
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "git checkout -- discards uncommitted changes..."
+  }
+}
+```
 
-1. Receives the command about to be executed via JSON stdin
-2. Checks if it matches any dangerous patterns
-3. Returns a deny decision with explanation if blocked
-4. Silently allows safe commands
+The command never executes. Claude sees the reason and should ask the user for help.
+
+### File Structure
+
+```
+.claude/
+├── settings.json              # Hook configuration
+└── hooks/
+    └── git_safety_guard.py    # Guard script
+```
+
+For global protection, use `~/.claude/` instead.
 
 ### Configuration
 
-`.claude/settings.json` tells Claude Code to run the guard on all Bash commands:
+`.claude/settings.json`:
 
 ```json
 {
@@ -64,142 +112,14 @@ The `PreToolUse` hook receives the full tool input as JSON via stdin and can:
 }
 ```
 
-## Commands Blocked
-
-**Note:** Absolute paths are normalized before matching. `/bin/rm`, `/usr/bin/rm`, `/usr/bin/git`, etc. are all detected and blocked the same as their bare command equivalents.
-
-| Command Pattern | Why It's Dangerous |
-|-----------------|-------------------|
-| `git checkout -- <files>` | Discards uncommitted changes permanently |
-| `git restore <files>` | Same as checkout -- (newer syntax) |
-| `git reset --hard` | Destroys all uncommitted changes |
-| `git reset --merge` | Can lose uncommitted changes |
-| `git clean -f` | Removes untracked files permanently |
-| `git push --force` | Destroys remote history |
-| `git push -f` | Same as --force |
-| `git branch -D` | Force-deletes branch without merge check |
-| `rm -rf` (non-temp paths) | Recursive file deletion (except `/tmp`, `/var/tmp`, `$TMPDIR`) |
-| `/bin/rm -rf`, `/usr/bin/rm -rf` | Same as above - absolute paths are normalized |
-| `git stash drop` | Permanently deletes stashed changes |
-| `git stash clear` | Deletes ALL stashed changes |
-
-## Commands Explicitly Allowed
-
-These patterns are allowlisted even if they partially match blocked patterns:
-
-| Command Pattern | Why It's Safe |
-|-----------------|---------------|
-| `git checkout -b <branch>` | Creates new branch, doesn't modify files |
-| `git checkout --orphan` | Creates orphan branch |
-| `git restore --staged` | Only unstages files, doesn't discard changes |
-| `git clean -n` / `--dry-run` | Preview only, no actual deletion |
-| `rm -rf /tmp/...` | Temp directories are designed for ephemeral data |
-| `rm -rf /var/tmp/...` | System temp directory, safe to clean |
-| `rm -rf $TMPDIR/...` | User's temp directory, safe to clean |
-
-## What Happens When Blocked
-
-When Claude tries to run a blocked command, it receives feedback like:
-
-```
-BLOCKED by git_safety_guard.py
-
-Reason: git checkout -- discards uncommitted changes permanently. Use 'git stash' first.
-
-Command: git checkout -- file.txt
-
-If this operation is truly needed, ask the user for explicit permission and have them run the command manually.
-```
-
-The command never executes. Claude sees this feedback and should ask the user for help.
-
-## Testing the Hook
-
-You can test the hook manually:
-
-```bash
-# Should be blocked
-echo '{"tool_name": "Bash", "tool_input": {"command": "git checkout -- file.txt"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-
-# Should be allowed (no output)
-echo '{"tool_name": "Bash", "tool_input": {"command": "git status"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-
-# rm -rf on non-temp path should be blocked
-echo '{"tool_name": "Bash", "tool_input": {"command": "rm -rf /some/path"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-
-# rm -rf on temp path should be allowed (no output)
-echo '{"tool_name": "Bash", "tool_input": {"command": "rm -rf /tmp/test-dir"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-
-# ABSOLUTE PATH TESTS - these should all be BLOCKED (previously bypassed the guard!)
-# /bin/rm should be blocked
-echo '{"tool_name": "Bash", "tool_input": {"command": "/bin/rm -rf /home/user"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-
-# /usr/bin/rm should be blocked
-echo '{"tool_name": "Bash", "tool_input": {"command": "/usr/bin/rm -rf /some/path"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-
-# /usr/bin/git should be blocked
-echo '{"tool_name": "Bash", "tool_input": {"command": "/usr/bin/git reset --hard"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-
-# sudo with absolute path should be blocked (pattern finds 'rm -rf' via re.search)
-echo '{"tool_name": "Bash", "tool_input": {"command": "sudo /bin/rm -rf /important"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-
-# Absolute path to temp dir should be ALLOWED (no output)
-echo '{"tool_name": "Bash", "tool_input": {"command": "/bin/rm -rf /tmp/test"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-
-# REGRESSION TEST: Paths containing 'rm' should NOT be corrupted
-# This command should be BLOCKED (not allowed), but the path must stay intact
-# Bug: old code would corrupt /home/rm-backup/ to rm-backup/
-echo '{"tool_name": "Bash", "tool_input": {"command": "rm -rf /home/rm-backup/"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-# Expected: BLOCKED with "Command: rm -rf /home/rm-backup/" (path preserved)
-
-# REGRESSION TEST: Path arguments ending in bin/rm should NOT be corrupted
-# Bug: old code would corrupt /home/user/bin/rm to rm
-echo '{"tool_name": "Bash", "tool_input": {"command": "rm /home/user/bin/rm"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-# Expected: ALLOWED (rm without -rf on single file is OK, path must stay intact)
-
-# REGRESSION TEST: git clean -fn (dry run) should be ALLOWED
-# Bug: old code only matched -n at specific position, not -fn or -nf
-echo '{"tool_name": "Bash", "tool_input": {"command": "git clean -fn"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-# Expected: ALLOWED (no output) - dry run is safe regardless of flag order
-
-echo '{"tool_name": "Bash", "tool_input": {"command": "git clean -nf"}}' | \
-  python3 .claude/hooks/git_safety_guard.py
-# Expected: ALLOWED (no output) - same as above, different order
-```
-
-## Important Notes
-
-### Restart Required
-
-Claude Code snapshots hook configuration at startup. After adding or modifying hooks, you must **restart Claude Code** for changes to take effect.
-
-### Project-Specific
-
-This hook is configured in `.claude/settings.json` within the project directory, so it only applies to sessions in that project. For global protection across all projects, add the hook to `~/.claude/settings.json` instead.
-
-### Not Foolproof
-
-The hook uses regex pattern matching. Clever or obfuscated commands might bypass it. It's a safety net, not a security boundary. The real defense is still the instructions in `AGENTS.md` - this hook just catches honest mistakes.
-
-### Timeout
-
-Hooks have a 60-second timeout by default. The guard script runs in milliseconds, so this isn't a concern.
+---
 
 ## Automated Setup Script
 
-Save this script and run it to install the protection. Supports both project-local and global installation.
+Save this script and run it. Supports both project-local and global installation.
+
+<details>
+<summary><strong>install-claude-git-guard.sh</strong> (click to expand)</summary>
 
 ```bash
 #!/usr/bin/env bash
@@ -567,35 +487,61 @@ else
 fi
 ```
 
-### Quick One-Liner Installation
-
-For project-local installation (current directory):
-
-```bash
-curl -fsSL https://gist.githubusercontent.com/YOUR_USERNAME/GIST_ID/raw/install-claude-git-guard.sh | bash
-```
-
-For global installation:
-
-```bash
-curl -fsSL https://gist.githubusercontent.com/YOUR_USERNAME/GIST_ID/raw/install-claude-git-guard.sh | bash -s -- --global
-```
-
-*(Replace with actual gist URL if you publish this script)*
+</details>
 
 ## Manual Installation
 
 If you prefer not to use the script:
 
-1. Create `.claude/hooks/` directory in your project (or `~/.claude/hooks/` for global)
+1. Create `.claude/hooks/` directory (or `~/.claude/hooks/` for global)
 2. Copy `git_safety_guard.py` into it
 3. Make it executable: `chmod +x .claude/hooks/git_safety_guard.py`
-4. Create `.claude/settings.json` with the hook configuration (see Configuration section above)
+4. Create `.claude/settings.json` with the hook configuration (see [Configuration](#configuration))
 5. Restart Claude Code
 
-## Adding More Blocked Commands
+---
 
-Edit `git_safety_guard.py` and add patterns to `DESTRUCTIVE_PATTERNS`:
+## Testing
+
+<details>
+<summary><strong>Test commands</strong></summary>
+
+```bash
+# Should be BLOCKED
+echo '{"tool_name": "Bash", "tool_input": {"command": "git checkout -- file.txt"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# Should be ALLOWED (no output)
+echo '{"tool_name": "Bash", "tool_input": {"command": "git status"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# rm -rf on non-temp path: BLOCKED
+echo '{"tool_name": "Bash", "tool_input": {"command": "rm -rf /some/path"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# rm -rf on temp path: ALLOWED
+echo '{"tool_name": "Bash", "tool_input": {"command": "rm -rf /tmp/test-dir"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# Absolute paths: BLOCKED
+echo '{"tool_name": "Bash", "tool_input": {"command": "/bin/rm -rf /home/user"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+echo '{"tool_name": "Bash", "tool_input": {"command": "/usr/bin/git reset --hard"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+
+# Dry run: ALLOWED
+echo '{"tool_name": "Bash", "tool_input": {"command": "git clean -fn"}}' | \
+  python3 .claude/hooks/git_safety_guard.py
+```
+
+</details>
+
+---
+
+## Extending the Guard
+
+To add more blocked commands, edit `git_safety_guard.py`:
 
 ```python
 DESTRUCTIVE_PATTERNS = [
@@ -607,7 +553,7 @@ DESTRUCTIVE_PATTERNS = [
 ]
 ```
 
-If a pattern has safe variants, add them to `SAFE_PATTERNS`:
+To allowlist safe variants of blocked commands:
 
 ```python
 SAFE_PATTERNS = [
@@ -616,7 +562,20 @@ SAFE_PATTERNS = [
 ]
 ```
 
-## The Incident That Prompted This
+---
+
+## Important Notes
+
+| Topic | Details |
+|:------|:--------|
+| **Restart required** | Claude Code snapshots hook configuration at startup. Restart after installing. |
+| **Scope** | Project-local (`.claude/`) or global (`~/.claude/`). Global protects all projects. |
+| **Limitations** | Uses regex pattern matching. Obfuscated commands might bypass it. This is a safety net for honest mistakes, not a security boundary. |
+| **Timeout** | Hooks have a 60-second timeout. The guard runs in milliseconds. |
+
+---
+
+## The Incident
 
 ```
 User: OMG you erased uncommitted changes from the other agent?!?!?!??!? HOURS OF WORK!!!
@@ -624,19 +583,25 @@ User: YOU ARE EXPRESSLY FORBIDDEN FROM DOING THIS IN AGENTS.md
 ```
 
 The agent had run:
+
 ```bash
 git checkout -- .ubsignore ubs modules/helpers/resource_lifecycle_py.py \
   modules/helpers/type_narrowing_rust.py modules/ubs-swift.sh
 ```
 
-This silently replaced all those files with their last committed versions, erasing hours of work from a parallel Codex session. The work was recovered via `git fsck --lost-found` which found a dangling tree object from Codex's snapshot, but it was a close call.
-
-**Instructions alone don't prevent accidents. Mechanical enforcement does.**
+This silently replaced all those files with their last committed versions, erasing hours of work from a parallel Codex session. The work was recovered via `git fsck --lost-found`, which found a dangling tree object from Codex's snapshot.
 
 ---
 
-*Created: December 17, 2025*
-*Updated: January 5, 2026 - **SECURITY FIX**: Added `_normalize_absolute_paths()` to block `/bin/rm`, `/usr/bin/rm`, `/usr/bin/git`, etc. Previously these absolute paths bypassed all pattern matching. Also preserves original command in error messages. **BUGFIX #1**: Normalization now ONLY applies at start of command string to prevent corrupting path arguments (e.g., `rm /home/user/bin/rm` stays intact). Commands like `sudo /bin/rm` still caught via re.search. **BUGFIX #2**: Fixed `git clean -fn` being incorrectly blocked - safe pattern now matches `-n` anywhere in flags, not just at specific position.*
-*Previously: January 3, 2026 - Fixed null input crash, non-string command crash, added rm -r -f separate flags and --recursive --force long options patterns, case sensitivity fixes, rm -Rf/-fR handling*
+## Changelog
+
+| Date | Changes |
+|:-----|:--------|
+| Jan 5, 2026 | **Security fix:** Added `_normalize_absolute_paths()` to block `/bin/rm`, `/usr/bin/git`, etc. Fixed path argument corruption bug. Fixed `git clean -fn` false positive. |
+| Jan 3, 2026 | Fixed null input crash, non-string command crash. Added `rm -r -f` (separate flags) and `--recursive --force` patterns. Case sensitivity fixes. |
+| Dec 17, 2025 | Initial version after the incident. |
+
+---
+
 *Project: Ultimate Bug Scanner*
 *Related: AGENTS.md, .claude/hooks/git_safety_guard.py*

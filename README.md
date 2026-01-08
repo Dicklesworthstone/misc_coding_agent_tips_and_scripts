@@ -8,6 +8,9 @@ Practical guides for AI coding agents, terminal customization, and development t
 |:------|:---------------|:---------------|
 | [Destructive Git Command Protection](#destructive-git-command-protection) | AI agent ran `git checkout --` and destroyed uncommitted work | 5 min |
 | [Host-Aware Terminal Colors](#host-aware-color-themes) | Can't tell which terminal is connected to production | 5-15 min |
+| [Ghostty Terminfo for Remote Machines](#ghostty-terminfo-for-remote-machines) | Numpad Enter shows `[57414u` garbage when SSH'd | 2 min |
+| [macOS NFS Auto-Mount](#macos-nfs-auto-mount) | Have to manually mount remote dev server after every reboot | 10 min |
+| [Budget 10GbE Direct Link](#budget-10gbe-direct-link) | File transfers crawl at 100MB/s through gigabit switch | 30 min |
 | [MX Master Tab Switching](#mx-master-thumbwheel-tab-switching) | Thumbwheel does horizontal scroll instead of something useful | 10 min |
 | [Claude Code Native Install Fix](#claude-code-native-install-fix) | `claude --version` shows old version after native install | 5 min |
 | [Beads Setup](#beads-setup) | Worktree errors when syncing Beads | 5 min |
@@ -58,6 +61,37 @@ echo '{"tool_name": "Bash", "tool_input": {"command": "git checkout -- file.txt"
 ---
 
 ## Terminal Customization
+
+### Ghostty Terminfo for Remote Machines
+
+When using Ghostty to SSH into remote servers, you might see garbage like `[57414u` when pressing numpad Enter. This happens because the remote system doesn't understand the Kitty keyboard protocol that Ghostty uses.
+
+**One-liner fix:**
+
+```bash
+infocmp -x xterm-ghostty | ssh user@your-server 'mkdir -p ~/.terminfo && tic -x -o ~/.terminfo -'
+```
+
+<details>
+<summary><strong>Helper function for multiple servers</strong></summary>
+
+Add to `~/.zshrc`:
+
+```bash
+ghostty_push_terminfo() {
+  local host="$1"
+  [[ -z "$host" ]] && { echo "Usage: ghostty_push_terminfo <host>" >&2; return 1; }
+  infocmp -x xterm-ghostty | ssh "$host" 'mkdir -p ~/.terminfo && tic -x -o ~/.terminfo -'
+}
+```
+
+Then: `ghostty_push_terminfo ubuntu@dev-server`
+
+</details>
+
+**[Full guide →](GHOSTTY_TERMINFO_FOR_REMOTE_MACHINES.md)**
+
+---
 
 ### Host-Aware Color Themes
 
@@ -115,7 +149,7 @@ The horizontal thumbwheel on Logitech MX Master mice is designed for horizontal 
    ```
 3. Add keybindings to each app (WezTerm, Ghostty, VS Code, etc.)
 
-**Companion script:** [`bettermouse_config.py`](bettermouse_config.py) — Export/import BetterMouse settings as JSON for backup or sharing. Run with `uv run bettermouse_config.py show` to view your current config.
+**Companion script:** [`bettermouse_config.py`](bettermouse_config.py) exports and imports BetterMouse settings as JSON for backup or sharing. Run with `uv run bettermouse_config.py show` to view your current config.
 
 <details>
 <summary><strong>Why Ctrl+Shift+Arrow?</strong></summary>
@@ -130,6 +164,88 @@ The horizontal thumbwheel on Logitech MX Master mice is designed for horizontal 
 </details>
 
 **[Full guide →](GUIDE_TO_SETTING_UP_YOUR_MX_MASTER_MOUSE_FOR_DEV_WORK_ON_MAC.md)**
+
+---
+
+## Remote Development
+
+### macOS NFS Auto-Mount
+
+If you have a remote Linux workstation with projects at `/data/projects`, you can make it automatically mount on your Mac at boot with graceful retry logic.
+
+**What you get:**
+
+```
+~/dev-projects → /Volumes/dev-server/projects → 10.0.0.50:/data/projects
+```
+
+**Components:**
+
+| Component | Purpose |
+|:----------|:--------|
+| Mount script | Retries with exponential backoff when server is offline |
+| LaunchDaemon | Runs at boot, re-mounts on network changes |
+| Symlink | Convenient `~/dev-projects` path |
+| Synthetic firmlink | Optional `/dev/projects` root-level path |
+
+<details>
+<summary><strong>Quick setup</strong></summary>
+
+```bash
+# Create mount script
+sudo tee /usr/local/bin/mount-dev-nfs << 'EOF'
+#!/bin/bash
+REMOTE_HOST="10.0.0.50"
+MOUNT_POINT="/Volumes/dev-server"
+[ -d "$MOUNT_POINT" ] || mkdir -p "$MOUNT_POINT"
+mount | grep -q "$MOUNT_POINT" && exit 0
+ping -c 1 -W 1 "$REMOTE_HOST" &>/dev/null || exit 1
+/sbin/mount_nfs -o resvport,rw,soft,intr,bg "$REMOTE_HOST:/data" "$MOUNT_POINT"
+EOF
+sudo chmod +x /usr/local/bin/mount-dev-nfs
+
+# Create LaunchDaemon (see full guide for complete plist)
+# Then: sudo launchctl load /Library/LaunchDaemons/com.local.mount-dev-nfs.plist
+
+# Create symlink
+ln -sf /Volumes/dev-server/projects ~/dev-projects
+```
+
+</details>
+
+**[Full guide →](MACOS_NFS_AUTOMOUNT_FOR_REMOTE_DEV.md)**
+
+---
+
+### Budget 10GbE Direct Link
+
+Connect your Mac directly to a Linux workstation with 10GbE for ~$90 total, achieving 800+ MB/s transfers.
+
+```
+Mac Mini M4                    Linux Workstation
+┌─────────────┐                ┌─────────────────┐
+│ Thunderbolt │◄──Cat6 $5────►│ Built-in 10GbE  │
+│ 10GbE ~$85  │                │ (Aquantia)      │
+└─────────────┘                └─────────────────┘
+     Static IPs: 10.10.10.x | Speed: ~850 MB/s
+```
+
+**What you need:**
+
+| Component | Cost |
+|:----------|:-----|
+| IOCREST Thunderbolt 10GbE adapter | ~$85 (AliExpress) |
+| Cat6 cable | ~$5 |
+
+Many high-end workstations (Threadripper PRO, EPYC) have **unused 10GbE ports**. The IOCREST adapter uses the same Aquantia chip as Mac Studio's built-in 10GbE.
+
+**Also includes:**
+- SHA-256 verified file transfers with speed reporting
+- Clipboard sync between Mac and Linux (Wayland/X11)
+- Remote display wake-up commands
+- AI coding agent aliases (Claude, Gemini, Codex)
+
+**[Full guide →](BUDGET_10GBE_DIRECT_LINK_AND_REMOTE_PRODUCTIVITY.md)**
 
 ---
 
@@ -221,7 +337,7 @@ cpfm    # Copy clipboard from Mac
 | Terminals | WezTerm, Ghostty, iTerm2 |
 | Editors | VS Code, Zed |
 | Version Control | Git (with safety hooks) |
-| Remote Desktop | Moonlight, Sunshine |
+| Remote Access | NFS, SSH, Moonlight, Sunshine |
 | Package Managers | bun, npm, native installers |
 | Hardware | NVIDIA GPUs, Logitech MX Master |
 | OS | macOS, Linux (Ubuntu, Arch) |

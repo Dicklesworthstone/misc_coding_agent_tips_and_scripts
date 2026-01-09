@@ -1,0 +1,10 @@
+# macOS resource forks (not code)
+._*
+
+# Log files (not code)
+*.log
+*.log.gz
+.beads/daemon-*.log.gz
+
+# Binary/metadata files (not code)
+.DS_Store

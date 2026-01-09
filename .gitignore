@@ -1,0 +1,13 @@
+# macOS resource forks and metadata
+._*
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Beads daemon logs
+.beads/daemon-*.log.gz
+
+# Editor artifacts
+*.swp
+*.swo
+*~

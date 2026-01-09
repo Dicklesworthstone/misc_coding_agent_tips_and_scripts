@@ -8,13 +8,17 @@ Practical guides for AI coding agents, terminal customization, and development t
 |:------|:---------------|:---------------|
 | [Destructive Git Command Protection](#destructive-git-command-protection) | AI agent ran `git checkout --` and destroyed uncommitted work | 5 min |
 | [Host-Aware Terminal Colors](#host-aware-color-themes) | Can't tell which terminal is connected to production | 5-15 min |
+| [WezTerm Persistent Sessions](#wezterm-persistent-remote-sessions) | Remote terminal sessions die when Mac sleeps or reboots | 20 min |
 | [Ghostty Terminfo for Remote Machines](#ghostty-terminfo-for-remote-machines) | Numpad Enter shows `[57414u` garbage when SSH'd | 2 min |
 | [macOS NFS Auto-Mount](#macos-nfs-auto-mount) | Have to manually mount remote dev server after every reboot | 10 min |
 | [Budget 10GbE Direct Link](#budget-10gbe-direct-link) | File transfers crawl at 100MB/s through gigabit switch | 30 min |
 | [MX Master Tab Switching](#mx-master-thumbwheel-tab-switching) | Thumbwheel does horizontal scroll instead of something useful | 10 min |
+| [Reducing Vercel Build Credits](#reducing-vercel-build-credits) | Automatic deployments burn through Pro plan credits | 10 min |
 | [Claude Code Native Install Fix](#claude-code-native-install-fix) | `claude --version` shows old version after native install | 5 min |
 | [Beads Setup](#beads-setup) | Worktree errors when syncing Beads | 5 min |
 | [Moonlight Streaming](#moonlight-streaming-configuration) | Remote desktop to Linux workstation with AV1 encoding | 30 min |
+| [Vault HA Cluster](#hashicorp-vault-ha-cluster) | Single Vault instance is a single point of failure | 45 min |
+| [DevOps CLI Tools](#devops-cli-tools) | Clicking through web dashboards wastes time | 15 min |
 
 ---
 
@@ -132,6 +136,59 @@ The `printf` commands send OSC escape sequences that change terminal colors. `\e
 </details>
 
 **[Full guide →](GUIDE_TO_SETTING_UP_HOST_AWARE_COLOR_THEMES_FOR_GHOSTTY_AND_WEZTERM.md)**
+
+---
+
+### WezTerm Persistent Remote Sessions
+
+Remote terminal sessions that survive Mac sleep, reboot, or power loss. Uses WezTerm's native multiplexing with `wezterm-mux-server` running on remote servers via systemd.
+
+```
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│ 󰍹  Local    │  │ 󰒋  Dev      │  │ 󰒋  Staging  │  │ 󰻠  Workstation│
+│  [3 tabs]    │  │  [3 tabs]    │  │  [3 tabs]    │  │  [3 tabs]     │
+│  (fresh)     │  │ (persistent) │  │ (persistent) │  │ (persistent)  │
+└──────────────┘  └──────────────┘  └──────────────┘  └───────────────┘
+```
+
+**Key features:**
+
+| Feature | How It Works |
+|:--------|:-------------|
+| Persistent sessions | `wezterm-mux-server` on remote holds state; Mac just reconnects |
+| Smart startup | Doesn't accumulate tabs on restart (checks if remote has existing tabs) |
+| Domain-specific colors | Each server gets distinct gradient + tab bar theme |
+| Better than tmux | Native scrollback, single keybinding namespace, GPU rendering |
+
+<details>
+<summary><strong>Remote setup (per server)</strong></summary>
+
+```bash
+# Create systemd user service
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/wezterm-mux-server.service << 'EOF'
+[Unit]
+Description=WezTerm Mux Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wezterm-mux-server --daemonize=false
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Enable and start
+systemctl --user daemon-reload
+systemctl --user enable --now wezterm-mux-server
+sudo loginctl enable-linger $USER
+```
+
+</details>
+
+**[Full guide →](WEZTERM_PERSISTENT_REMOTE_SESSIONS.md)**
 
 ---
 
@@ -297,6 +354,86 @@ bd config set sync.branch beads-sync
 
 ---
 
+### Reducing Vercel Build Credits
+
+Vercel's automatic deployments on every push can burn through Pro plan credits quickly. Use the REST API to disable auto-deployments and take control of when builds happen.
+
+**Before:**
+```
+git push → Vercel webhook → Build → Deploy → 💸 (every single push)
+```
+
+**After:**
+```
+git push → (nothing)
+vercel --prod → Build → Deploy → 💸 (only when you're ready)
+```
+
+**API command to disable auto-deploys:**
+
+```bash
+curl -X PATCH "https://api.vercel.com/v9/projects/${PROJECT_ID}?teamId=${TEAM_ID}" \
+  -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"gitProviderOptions": {"createDeployments": "disabled"}}'
+```
+
+<details>
+<summary><strong>Additional optimizations</strong></summary>
+
+| Setting | API Field | Effect |
+|:--------|:----------|:-------|
+| Disable auto-deploy | `gitProviderOptions.createDeployments` | No deploys on push/PR |
+| Smart skip | `enableAffectedProjectsDeployments` | Skip unchanged monorepo projects |
+| Custom check | `commandForIgnoringBuildStep` | Run script to decide |
+
+</details>
+
+**[Full guide →](REDUCING_VERCEL_BUILD_CREDITS.md)**
+
+---
+
+### DevOps CLI Tools
+
+Master the CLI for each cloud platform instead of clicking through web dashboards. This guide covers installation, authentication, and common commands for the tools you use daily.
+
+| Tool | Purpose |
+|:-----|:--------|
+| `gh` | GitHub PRs, issues, releases |
+| `vercel` | Deployments, logs, env vars |
+| `wrangler` | Cloudflare Workers, R2 storage |
+| `gcloud` | Google Cloud APIs, billing |
+| `supabase` | Database migrations, types |
+
+<details>
+<summary><strong>Quick install (all tools)</strong></summary>
+
+```bash
+# GitHub CLI
+brew install gh
+gh auth login
+
+# Vercel
+bun add -g vercel
+vercel login
+
+# Cloudflare Wrangler
+bun add -g wrangler
+wrangler login
+
+# Supabase
+bun add -g supabase
+supabase login
+```
+
+</details>
+
+The guide also includes AGENTS.md blurbs for each tool with placeholders for your project-specific values.
+
+**[Full guide →](GUIDE_TO_DEVOPS_CLI_TOOLS.md)**
+
+---
+
 ## Remote Desktop
 
 ### Moonlight Streaming Configuration
@@ -329,6 +466,65 @@ cpfm    # Copy clipboard from Mac
 
 ---
 
+## Infrastructure
+
+### HashiCorp Vault HA Cluster
+
+A highly available secrets manager using 3-node Raft consensus. If the leader fails, the cluster elects a new leader and keeps running.
+
+```
+┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+│   NODE 1         │   │   NODE 2         │   │   NODE 3         │
+│   (Leader)       │   │   (Follower)     │   │   (Follower)     │
+│   10.0.1.10      │   │   10.0.1.11      │   │   10.0.1.12      │
+└────────┬─────────┘   └────────┬─────────┘   └────────┬─────────┘
+         └──────────────────────┼──────────────────────┘
+                          Raft Consensus
+```
+
+**Why Integrated Raft:**
+
+| Benefit | Description |
+|:--------|:------------|
+| No external dependencies | Storage built into Vault |
+| Automatic failover | Leader election in seconds |
+| Consistent replication | All nodes have the same data |
+
+<details>
+<summary><strong>Initialize cluster (first node only)</strong></summary>
+
+```bash
+export VAULT_ADDR='http://127.0.0.1:8200'
+
+# Initialize with Shamir's Secret Sharing
+vault operator init -key-shares=5 -key-threshold=3
+
+# Save the unseal keys and root token securely!
+# You need 3 of 5 keys to unseal after restart.
+
+# Unseal
+vault operator unseal  # x3 with different keys
+```
+
+</details>
+
+<details>
+<summary><strong>Check cluster health</strong></summary>
+
+```bash
+vault operator raft list-peers
+# Node     Address              State       Voter
+# node1    10.0.1.10:8201       leader      true
+# node2    10.0.1.11:8201       follower    true
+# node3    10.0.1.12:8201       follower    true
+```
+
+</details>
+
+**[Full guide →](HASHICORP_VAULT_HA_CLUSTER_SETUP.md)**
+
+---
+
 ## Tech Stack
 
 | Category | Tools |
@@ -338,6 +534,8 @@ cpfm    # Copy clipboard from Mac
 | Editors | VS Code, Zed |
 | Version Control | Git (with safety hooks) |
 | Remote Access | NFS, SSH, Moonlight, Sunshine |
+| Infrastructure | HashiCorp Vault, systemd |
+| Platforms | Vercel |
 | Package Managers | bun, npm, native installers |
 | Hardware | NVIDIA GPUs, Logitech MX Master |
 | OS | macOS, Linux (Ubuntu, Arch) |
@@ -349,6 +547,8 @@ cpfm    # Copy clipboard from Mac
 - [Moonlight](https://moonlight-stream.org/) / [Sunshine](https://github.com/LizardByte/Sunshine)
 - [BetterMouse](https://better-mouse.com)
 - [WezTerm](https://wezfurlong.org/wezterm/) / [Ghostty](https://ghostty.org)
+- [HashiCorp Vault](https://www.vaultproject.io/) / [Vault Tutorials](https://developer.hashicorp.com/vault/tutorials)
+- [Vercel REST API](https://vercel.com/docs/rest-api)
 
 ---
 

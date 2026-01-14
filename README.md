@@ -15,6 +15,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | [MX Master Tab Switching](#mx-master-thumbwheel-tab-switching) | Thumbwheel does horizontal scroll instead of something useful | 10 min |
 | [Reducing Vercel Build Credits](#reducing-vercel-build-credits) | Automatic deployments burn through Pro plan credits | 10 min |
 | [Claude Code Native Install Fix](#claude-code-native-install-fix) | `claude --version` shows old version after native install | 5 min |
+| [Claude Code MCP Config Fix](#claude-code-mcp-config-fix) | MCP servers wiped out, need quick restore | 2 min |
 | [Beads Setup](#beads-setup) | Worktree errors when syncing Beads | 5 min |
 | [Moonlight Streaming](#moonlight-streaming-configuration) | Remote desktop to Linux workstation with AV1 encoding | 30 min |
 | [Vault HA Cluster](#hashicorp-vault-ha-cluster) | Single Vault instance is a single point of failure | 45 min |
@@ -334,6 +335,46 @@ rm ~/.bun/bin/claude 2>/dev/null
 
 ---
 
+### Claude Code MCP Config Fix
+
+Claude Code stores MCP server configurations in `~/.claude.json`. These can get wiped out by fresh installs, updates, or config corruption. Instead of running the full MCP Agent Mail installer, use this lightweight script that only restores the MCP config.
+
+**One command fix:**
+
+```bash
+fix_cc_mcp
+```
+
+**What it restores:**
+
+| Server | Type | Purpose |
+|:-------|:-----|:--------|
+| `mcp-agent-mail` | HTTP | Multi-agent coordination, messaging, file reservations |
+| `morph-mcp` | stdio | AI-powered code search via `warp_grep` |
+
+<details>
+<summary><strong>Quick install</strong></summary>
+
+```bash
+# Download and install the script
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/FIX_CLAUDE_CODE_MCP_CONFIG.md | \
+  sed -n '/^SCRIPT$/,/^SCRIPT$/p' | sed '1d;$d' > ~/.local/bin/fix_cc_mcp
+chmod +x ~/.local/bin/fix_cc_mcp
+
+# Edit to add your Morph API key
+nano ~/.local/bin/fix_cc_mcp
+```
+
+Or copy the script from the full guide.
+
+</details>
+
+**Token discovery:** The script automatically finds your bearer token from `MCP_AGENT_MAIL_TOKEN` env var, `~/mcp_agent_mail/.env`, or existing `~/.claude.json`.
+
+**[Full guide →](FIX_CLAUDE_CODE_MCP_CONFIG.md)**
+
+---
+
 ### Beads Setup
 
 [Beads](https://github.com/beads-project/beads) uses git worktrees for sync operations. If your `sync.branch` is set to your current branch, you'll get:
@@ -543,6 +584,8 @@ vault operator raft list-peers
 ## Related
 
 - [Claude Code Documentation](https://docs.anthropic.com/en/docs/claude-code)
+- [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) - Multi-agent coordination server
+- [Morph MCP](https://github.com/morphllm/morphmcp) - AI-powered code search
 - [Beads Project](https://github.com/beads-project/beads)
 - [Moonlight](https://moonlight-stream.org/) / [Sunshine](https://github.com/LizardByte/Sunshine)
 - [BetterMouse](https://better-mouse.com)

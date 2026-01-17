@@ -1,0 +1,372 @@
+#!/usr/bin/env bash
+# mirror_cc_skills - Mirror Claude Code skills to global settings
+#
+# Usage:
+#   mirror_cc_skills              # Mirror from current directory
+#   mirror_cc_skills /path/to/project  # Mirror from specified project
+#   mirror_cc_skills --sync       # Also delete skills not in source (with backup)
+#   mirror_cc_skills --dry-run    # Preview what would be copied
+#   mirror_cc_skills --help       # Show help
+#
+# By default, this ONLY copies/updates skills. It never deletes skills
+# from the destination that don't exist in source. Use --sync for that.
+
+set -euo pipefail
+
+VERSION="1.0.0"
+
+# -----------------------------------------------------------------------------
+# Colors (fallback when gum not available)
+# -----------------------------------------------------------------------------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# Gum availability flag
+GUM_AVAILABLE=false
+
+# -----------------------------------------------------------------------------
+# Gum auto-installation
+# -----------------------------------------------------------------------------
+try_install_gum() {
+    local os="unknown"
+    case "$(uname -s)" in
+        Darwin*) os="macos" ;;
+        Linux*)  os="linux" ;;
+    esac
+
+    echo -e "${BLUE}→${NC} Installing gum for prettier output..."
+
+    case "$os" in
+        macos)
+            if command -v brew &> /dev/null; then
+                brew install gum &>/dev/null && return 0
+            fi
+            ;;
+        linux)
+            if command -v apt-get &> /dev/null; then
+                (
+                    sudo mkdir -p /etc/apt/keyrings 2>/dev/null
+                    curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg 2>/dev/null
+                    echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list >/dev/null
+                    sudo apt-get update -qq && sudo apt-get install -y -qq gum
+                ) &>/dev/null && return 0
+            elif command -v dnf &> /dev/null; then
+                (
+                    echo '[charm]
+name=Charm
+baseurl=https://repo.charm.sh/yum/
+enabled=1
+gpgcheck=1
+gpgkey=https://repo.charm.sh/yum/gpg.key' | sudo tee /etc/yum.repos.d/charm.repo >/dev/null
+                    sudo dnf install -y gum
+                ) &>/dev/null && return 0
+            elif command -v pacman &> /dev/null; then
+                sudo pacman -S --noconfirm gum &>/dev/null && return 0
+            fi
+
+            # Fallback: download from GitHub releases
+            local arch
+            arch=$(uname -m)
+            case "$arch" in
+                x86_64) arch="amd64" ;;
+                aarch64|arm64) arch="arm64" ;;
+                *) return 1 ;;
+            esac
+
+            local tmp_dir
+            tmp_dir=$(mktemp -d)
+            local gum_version="0.14.5"
+            local gum_url="https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Linux_${arch}.tar.gz"
+
+            (
+                cd "$tmp_dir"
+                curl -fsSL "$gum_url" -o gum.tar.gz
+                tar -xzf gum.tar.gz
+                sudo mv gum /usr/local/bin/gum 2>/dev/null || {
+                    mkdir -p ~/.local/bin
+                    mv gum ~/.local/bin/gum
+                }
+            ) &>/dev/null && rm -rf "$tmp_dir" && return 0
+
+            rm -rf "$tmp_dir"
+            ;;
+    esac
+
+    return 1
+}
+
+check_gum() {
+    if command -v gum &> /dev/null; then
+        GUM_AVAILABLE=true
+        return 0
+    fi
+
+    # Try to install gum
+    if try_install_gum; then
+        # Add ~/.local/bin to PATH if gum was installed there
+        if [[ -x "${HOME}/.local/bin/gum" && ":$PATH:" != *":${HOME}/.local/bin:"* ]]; then
+            export PATH="${HOME}/.local/bin:${PATH}"
+        fi
+        if command -v gum &> /dev/null; then
+            GUM_AVAILABLE=true
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+# Styled output functions
+# -----------------------------------------------------------------------------
+print_banner() {
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum style \
+            --border rounded \
+            --border-foreground 212 \
+            --padding "0 2" \
+            --margin "1 0" \
+            --bold \
+            "🔄 mirror_cc_skills v${VERSION}" \
+            "Sync skills to ~/.claude/skills"
+    else
+        echo -e "\n${BOLD}${MAGENTA}╭──────────────────────────────────────────╮${NC}"
+        echo -e "${BOLD}${MAGENTA}│${NC}  ${BOLD}🔄 mirror_cc_skills v${VERSION}${NC}               ${BOLD}${MAGENTA}│${NC}"
+        echo -e "${BOLD}${MAGENTA}│${NC}  ${DIM}Sync skills to ~/.claude/skills${NC}         ${BOLD}${MAGENTA}│${NC}"
+        echo -e "${BOLD}${MAGENTA}╰──────────────────────────────────────────╯${NC}\n"
+    fi
+}
+
+log_info() {
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum style --foreground 39 "ℹ $1"
+    else
+        echo -e "${GREEN}[info]${NC} $1"
+    fi
+}
+
+log_warn() {
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum style --foreground 214 "⚠ $1"
+    else
+        echo -e "${YELLOW}[warn]${NC} $1"
+    fi
+}
+
+log_error() {
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum style --foreground 196 "✗ $1"
+    else
+        echo -e "${RED}[error]${NC} $1" >&2
+    fi
+}
+
+log_success() {
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum style --foreground 82 "✓ $1"
+    else
+        echo -e "${GREEN}✓${NC} $1"
+    fi
+}
+
+log_step() {
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum style --foreground 39 "→ $1"
+    else
+        echo -e "${BLUE}→${NC} $1"
+    fi
+}
+
+show_help() {
+    check_gum || true
+
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum style \
+            --border rounded \
+            --border-foreground 212 \
+            --padding "0 2" \
+            --margin "1 0" \
+            --bold \
+            "🔄 mirror_cc_skills v${VERSION}"
+
+        echo ""
+        gum style --foreground 214 --bold "SYNOPSIS"
+        echo "  mirror_cc_skills [OPTIONS] [PROJECT_DIR]"
+        echo ""
+
+        gum style --foreground 214 --bold "DESCRIPTION"
+        gum style --padding "0 2" "Mirror Claude Code skills from a project's .claude/skills/
+directory to your global ~/.claude/skills/ directory."
+        echo ""
+
+        gum style --foreground 214 --bold "OPTIONS"
+        gum style --foreground 82 "  --dry-run, -n"
+        gum style --foreground 245 "      Preview changes without modifying anything"
+        gum style --foreground 82 "  --sync"
+        gum style --foreground 245 "      Delete skills not in source (creates backup first)"
+        gum style --foreground 82 "  --help, -h"
+        gum style --foreground 245 "      Show this help message"
+        echo ""
+
+        gum style --foreground 214 --bold "SAFETY"
+        gum style --padding "0 2" "By default, only adds/updates skills. Never deletes.
+Use --sync to fully synchronize (backs up first)."
+        echo ""
+
+        gum style --foreground 214 --bold "EXAMPLES"
+        gum style --foreground 39 "  # Mirror from current project"
+        echo "  mirror_cc_skills"
+        echo ""
+        gum style --foreground 39 "  # Mirror from specific project"
+        echo "  mirror_cc_skills /data/projects/my-skills"
+        echo ""
+        gum style --foreground 39 "  # Preview what would change"
+        echo "  mirror_cc_skills --dry-run"
+    else
+        echo -e "${BOLD}mirror_cc_skills${NC} v${VERSION}"
+        echo ""
+        echo "Mirror Claude Code skills to global ~/.claude/skills/"
+        echo ""
+        echo "USAGE:"
+        echo "  mirror_cc_skills [OPTIONS] [PROJECT_DIR]"
+        echo ""
+        echo "OPTIONS:"
+        echo "  --dry-run, -n   Preview changes without modifying anything"
+        echo "  --sync          Delete skills not in source (creates backup first)"
+        echo "  --help, -h      Show this help message"
+        echo ""
+        echo "EXAMPLES:"
+        echo "  mirror_cc_skills                        # from current directory"
+        echo "  mirror_cc_skills /path/to/project       # from specific project"
+        echo "  mirror_cc_skills --dry-run              # preview changes"
+    fi
+}
+
+show_skills_list() {
+    local dir="$1"
+    local skills
+    skills=$(ls -1 "$dir" 2>/dev/null)
+
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum style --foreground 214 --bold "Global skills:"
+        echo "$skills" | while read -r skill; do
+            gum style --foreground 82 "  ✓ $skill"
+        done
+    else
+        echo -e "${BOLD}Global skills:${NC}"
+        echo "$skills" | sed 's/^/  ✓ /'
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
+main() {
+    check_gum || true
+
+    SYNC_MODE=false
+    DRY_RUN=false
+    PROJECT_DIR="."
+
+    # Parse arguments
+    for arg in "$@"; do
+        case "$arg" in
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --sync)
+                SYNC_MODE=true
+                ;;
+            --dry-run|-n)
+                DRY_RUN=true
+                ;;
+            -*)
+                log_error "Unknown option: $arg"
+                echo "Usage: mirror_cc_skills [--sync] [--dry-run] [project_dir]" >&2
+                exit 1
+                ;;
+            *)
+                PROJECT_DIR="$arg"
+                ;;
+        esac
+    done
+
+    SOURCE_DIR="$PROJECT_DIR/.claude/skills"
+    DEST_DIR="$HOME/.claude/skills"
+
+    # Validate source exists
+    if [[ ! -d "$SOURCE_DIR" ]]; then
+        log_error "No skills directory found at $SOURCE_DIR"
+        exit 1
+    fi
+
+    # Ensure destination exists
+    mkdir -p "$DEST_DIR"
+
+    # Count skills
+    SKILL_COUNT=$(find "$SOURCE_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+
+    print_banner
+
+    if $DRY_RUN; then
+        log_info "[DRY RUN] Would mirror $SKILL_COUNT skills"
+        log_step "Source: $SOURCE_DIR"
+        log_step "Dest:   $DEST_DIR"
+    else
+        log_info "Mirroring $SKILL_COUNT skills"
+        log_step "Source: $SOURCE_DIR"
+        log_step "Dest:   $DEST_DIR"
+    fi
+
+    echo ""
+
+    RSYNC_OPTS="-av"
+    $DRY_RUN && RSYNC_OPTS="-avn"
+
+    if $SYNC_MODE; then
+        log_warn "--sync mode: Skills not in source will be DELETED"
+
+        if ! $DRY_RUN; then
+            BACKUP_DIR="$DEST_DIR.backup.$(date +%Y%m%d_%H%M%S)"
+            log_step "Creating backup at $BACKUP_DIR"
+            cp -r "$DEST_DIR" "$BACKUP_DIR"
+            log_success "Backup created"
+        fi
+
+        if [[ "$GUM_AVAILABLE" == "true" ]] && ! $DRY_RUN; then
+            gum spin --spinner dot --title "Syncing skills..." -- \
+                rsync $RSYNC_OPTS --delete "$SOURCE_DIR/" "$DEST_DIR/" > /dev/null
+        else
+            rsync $RSYNC_OPTS --delete "$SOURCE_DIR/" "$DEST_DIR/"
+        fi
+    else
+        # Safe mode: only add/update, never delete
+        if [[ "$GUM_AVAILABLE" == "true" ]] && ! $DRY_RUN; then
+            gum spin --spinner dot --title "Mirroring skills..." -- \
+                rsync $RSYNC_OPTS "$SOURCE_DIR/" "$DEST_DIR/" > /dev/null
+        else
+            rsync $RSYNC_OPTS "$SOURCE_DIR/" "$DEST_DIR/"
+        fi
+    fi
+
+    echo ""
+
+    if $DRY_RUN; then
+        log_info "[DRY RUN] No changes made"
+    else
+        log_success "Skills mirrored to ~/.claude/skills"
+    fi
+
+    echo ""
+    show_skills_list "$DEST_DIR"
+}
+
+main "$@"

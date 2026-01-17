@@ -16,6 +16,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | [Reducing Vercel Build Credits](#reducing-vercel-build-credits) | Automatic deployments burn through Pro plan credits | 10 min |
 | [Claude Code Native Install Fix](#claude-code-native-install-fix) | `claude --version` shows old version after native install | 5 min |
 | [Claude Code MCP Config Fix](#claude-code-mcp-config-fix) | MCP servers wiped out, need quick restore | 2 min |
+| [Mirror Claude Code Skills](#mirror-claude-code-skills) | Copy project skills to global ~/.claude/skills | 2 min |
 | [Beads Setup](#beads-setup) | Worktree errors when syncing Beads | 5 min |
 | [Moonlight Streaming](#moonlight-streaming-configuration) | Remote desktop to Linux workstation with AV1 encoding | 30 min |
 | [Vault HA Cluster](#hashicorp-vault-ha-cluster) | Single Vault instance is a single point of failure | 45 min |
@@ -372,6 +373,51 @@ Or copy the script from the full guide.
 **Token discovery:** The script automatically finds your bearer token from `MCP_AGENT_MAIL_TOKEN` env var, `~/mcp_agent_mail/.env`, or existing `~/.claude.json`.
 
 **[Full guide →](FIX_CLAUDE_CODE_MCP_CONFIG.md)**
+
+---
+
+### Mirror Claude Code Skills
+
+Claude Code skills are directories containing a `SKILL.md` file, stored in `.claude/skills/`. Project-local skills only work in that project, but global skills in `~/.claude/skills/` are available everywhere. This script mirrors skills from a project to the global directory using rsync.
+
+**Usage:**
+
+```bash
+mirror_cc_skills                     # Mirror from current project
+mirror_cc_skills /path/to/project    # Mirror from specific project
+mirror_cc_skills --dry-run           # Preview changes
+mirror_cc_skills --sync              # Delete skills not in source (backs up first)
+```
+
+**Behavior:**
+
+| Mode | What it does |
+|:-----|:-------------|
+| Default | Only adds/updates skills, never deletes from destination |
+| `--sync` | Full sync: deletes skills not in source (creates timestamped backup first) |
+| `--dry-run` | Shows what would be copied without making changes |
+
+<details>
+<summary><strong>Quick install</strong></summary>
+
+```bash
+# Download and install
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/mirror_cc_skills \
+  -o ~/.local/bin/mirror_cc_skills
+chmod +x ~/.local/bin/mirror_cc_skills
+```
+
+Or copy from this repo:
+```bash
+cp mirror_cc_skills ~/.local/bin/
+chmod +x ~/.local/bin/mirror_cc_skills
+```
+
+</details>
+
+**Note:** The script automatically installs [gum](https://github.com/charmbracelet/gum) on first run for prettier output (styled boxes and spinners). Works fine without it if installation fails.
+
+**[Script source →](mirror_cc_skills)**
 
 ---
 

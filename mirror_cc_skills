@@ -256,12 +256,20 @@ show_skills_list() {
 
     if [[ "$GUM_AVAILABLE" == "true" ]]; then
         gum style --foreground 214 --bold "Global skills:"
-        echo "$skills" | while read -r skill; do
-            gum style --foreground 82 "  ✓ $skill"
-        done
+        if [[ -n "$skills" ]]; then
+            echo "$skills" | while read -r skill; do
+                [[ -n "$skill" ]] && gum style --foreground 82 "  ✓ $skill"
+            done
+        else
+            gum style --foreground 245 "  (none)"
+        fi
     else
         echo -e "${BOLD}Global skills:${NC}"
-        echo "$skills" | sed 's/^/  ✓ /'
+        if [[ -n "$skills" ]]; then
+            echo "$skills" | sed 's/^/  ✓ /'
+        else
+            echo -e "  ${DIM}(none)${NC}"
+        fi
     fi
 }
 

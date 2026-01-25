@@ -1,0 +1,38 @@
+# Doodlestein Punk Theme for Ghostty
+# Based on Cyberpunk Aurora - deep space with electric neon
+#
+# A vibrant cyberpunk-inspired color scheme featuring:
+# - Deep space black background (#0a0e14)
+# - Electric cyan foreground for maximum readability
+# - Hot magenta cursor that pops against the dark void
+# - Neon palette with electric pinks, teals, and purples
+#
+# Usage: Add `theme = doodlestein-punk-theme-for-ghostty` to your ghostty config
+
+# Core colors
+background = #0a0e14
+foreground = #b3f4ff
+cursor-color = #ff00ff
+cursor-text = #0a0e14
+selection-background = #1a1f29
+selection-foreground = #ffffff
+
+# Normal colors (0-7)
+palette = 0=#1a1f29
+palette = 1=#ff3366
+palette = 2=#39ffb4
+palette = 3=#ffe566
+palette = 4=#00aaff
+palette = 5=#ff00ff
+palette = 6=#00ffff
+palette = 7=#c7d5e0
+
+# Bright colors (8-15)
+palette = 8=#3d4f5f
+palette = 9=#ff6b9d
+palette = 10=#6bffcd
+palette = 11=#ffef99
+palette = 12=#66ccff
+palette = 13=#ff66ff
+palette = 14=#66ffff
+palette = 15=#ffffff

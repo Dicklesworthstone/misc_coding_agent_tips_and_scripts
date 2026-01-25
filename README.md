@@ -13,6 +13,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | [macOS NFS Auto-Mount](#macos-nfs-auto-mount) | Have to manually mount remote dev server after every reboot | 10 min |
 | [Budget 10GbE Direct Link](#budget-10gbe-direct-link) | File transfers crawl at 100MB/s through gigabit switch | 30 min |
 | [MX Master Tab Switching](#mx-master-thumbwheel-tab-switching) | Thumbwheel does horizontal scroll instead of something useful | 10 min |
+| [Doodlestein Punk Theme](#doodlestein-punk-theme-for-ghostty) | Need a cyberpunk color scheme for Ghostty | 1 min |
 | [Reducing Vercel Build Credits](#reducing-vercel-build-credits) | Automatic deployments burn through Pro plan credits | 10 min |
 | [Claude Code Native Install Fix](#claude-code-native-install-fix) | `claude --version` shows old version after native install | 5 min |
 | [Claude Code MCP Config Fix](#claude-code-mcp-config-fix) | MCP servers wiped out, need quick restore | 2 min |
@@ -223,6 +224,58 @@ The horizontal thumbwheel on Logitech MX Master mice is designed for horizontal 
 </details>
 
 **[Full guide →](GUIDE_TO_SETTING_UP_YOUR_MX_MASTER_MOUSE_FOR_DEV_WORK_ON_MAC.md)**
+
+---
+
+### Doodlestein Punk Theme for Ghostty
+
+A vibrant cyberpunk-inspired color scheme for Ghostty featuring deep space black backgrounds with electric neon accents.
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Background: #0a0e14 (deep space black)             │
+│  Foreground: #b3f4ff (electric cyan)                │
+│  Cursor:     #ff00ff (hot magenta)                  │
+│                                                     │
+│  Palette highlights:                                │
+│    Red:    #ff3366 → #ff6b9d (electric pink)        │
+│    Green:  #39ffb4 → #6bffcd (neon teal)            │
+│    Blue:   #00aaff → #66ccff (cyber blue)           │
+│    Magenta:#ff00ff → #ff66ff (hot purple)           │
+└─────────────────────────────────────────────────────┘
+```
+
+**Quick install:**
+
+```bash
+# Copy theme to Ghostty themes directory
+mkdir -p ~/.config/ghostty/themes
+cp doodlestein-punk-theme-for-ghostty ~/.config/ghostty/themes/
+```
+
+**Usage:** Add to your Ghostty config (`~/.config/ghostty/config`):
+
+```
+theme = doodlestein-punk-theme-for-ghostty
+```
+
+<details>
+<summary><strong>Full palette</strong></summary>
+
+| Index | Normal | Bright | Color Name |
+|:------|:-------|:-------|:-----------|
+| 0/8   | `#1a1f29` | `#3d4f5f` | Black/Gray |
+| 1/9   | `#ff3366` | `#ff6b9d` | Red/Pink |
+| 2/10  | `#39ffb4` | `#6bffcd` | Green/Teal |
+| 3/11  | `#ffe566` | `#ffef99` | Yellow |
+| 4/12  | `#00aaff` | `#66ccff` | Blue/Cyan |
+| 5/13  | `#ff00ff` | `#ff66ff` | Magenta |
+| 6/14  | `#00ffff` | `#66ffff` | Cyan |
+| 7/15  | `#c7d5e0` | `#ffffff` | White |
+
+</details>
+
+**[Theme file →](doodlestein-punk-theme-for-ghostty)**
 
 ---
 

@@ -7,6 +7,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | Guide | Problem Solved | Time to Set Up |
 |:------|:---------------|:---------------|
 | [Destructive Git Command Protection](#destructive-git-command-protection) | AI agent ran `git checkout --` and destroyed uncommitted work | 5 min |
+| [Post-Compact AGENTS.md Reminder](#post-compact-agentsmd-reminder) | Claude forgets project conventions after context compaction | 2 min |
 | [Host-Aware Terminal Colors](#host-aware-color-themes) | Can't tell which terminal is connected to production | 5-15 min |
 | [WezTerm Persistent Sessions](#wezterm-persistent-remote-sessions) | Remote terminal sessions die when Mac sleeps or reboots | 20 min |
 | [Ghostty Terminfo for Remote Machines](#ghostty-terminfo-for-remote-machines) | Numpad Enter shows `[57414u` garbage when SSH'd | 2 min |
@@ -64,6 +65,61 @@ echo '{"tool_name": "Bash", "tool_input": {"command": "git checkout -- file.txt"
 </details>
 
 **[Full guide →](DESTRUCTIVE_GIT_COMMAND_CLAUDE_HOOKS_SETUP.md)**
+
+---
+
+### Post-Compact AGENTS.md Reminder
+
+> **Problem:** During long coding sessions, Claude Code compacts the conversation to stay within context limits. After compaction, Claude "forgets" project-specific conventions documented in AGENTS.md.
+
+A bash hook that detects context compaction and injects a reminder for Claude to re-read AGENTS.md.
+
+**How it works:** Claude Code's `SessionStart` hook fires with `source: "compact"` after compaction. The hook checks this field and outputs a reminder message that Claude sees immediately.
+
+<details>
+<summary><strong>Quick install</strong></summary>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/install-post-compact-reminder.sh | bash
+# Restart Claude Code after installation
+```
+
+Or manually create `~/.local/bin/claude-post-compact-reminder`:
+
+```bash
+#!/usr/bin/env bash
+set -e
+INPUT=$(cat)
+SOURCE=$(echo "$INPUT" | jq -r '.source // empty')
+if [[ "$SOURCE" == "compact" ]]; then
+    cat <<'EOF'
+<post-compact-reminder>
+Context was just compacted. Please reread AGENTS.md to refresh your understanding of project conventions and agent coordination patterns.
+</post-compact-reminder>
+EOF
+fi
+exit 0
+```
+
+Then add to `~/.claude/settings.json`:
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.local/bin/claude-post-compact-reminder" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+</details>
+
+**[Full guide →](CLAUDE_CODE_POST_COMPACT_AGENTS_MD_REMINDER.md)**
 
 ---
 

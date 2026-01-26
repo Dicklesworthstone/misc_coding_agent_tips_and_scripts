@@ -160,7 +160,7 @@ show_help() {
     echo -e "${CYAN}${BOLD}${UNDERLINE}DIAGNOSTIC OPTIONS${NC}"
     echo -e "  ${GREEN}--status${NC}, ${GREEN}--check${NC}     Show installation health and configuration"
     echo -e "  ${GREEN}--diff${NC}                Show changes between installed and new version"
-    echo -e "  ${GREEN}--verbose${NC}             Enable verbose/debug output"
+    echo -e "  ${GREEN}--verbose${NC}, ${GREEN}-V${NC}        Enable verbose/debug output"
     echo -e "  ${GREEN}--log${NC} ${MAGENTA}<file>${NC}         Log all operations to specified file"
     echo ""
     echo -e "${CYAN}${BOLD}${UNDERLINE}MAINTENANCE OPTIONS${NC}"
@@ -680,7 +680,7 @@ do_restore() {
     local settings_file="${settings_dir}/settings.json"
     local backup_file="${settings_file}.bak"
 
-    print_banner
+    # Note: banner already printed by main()
 
     if [[ ! -f "$backup_file" ]]; then
         log_error "No backup file found at $backup_file"
@@ -776,10 +776,11 @@ do_diff() {
 do_interactive() {
     local hook_dir="$1"
     local settings_dir="$2"
+    local dry_run="$3"
 
     local script_path="${hook_dir}/${SCRIPT_NAME}"
 
-    print_banner
+    # Note: banner already printed by main()
 
     echo -e "${WHITE}${BOLD}${UNDERLINE}Interactive Setup${NC}"
     echo ""
@@ -847,6 +848,16 @@ do_interactive() {
         return 0
     fi
 
+    # Dry run check
+    if [[ "$dry_run" == "true" ]]; then
+        echo ""
+        log_step "[dry-run] Would create $script_path with custom message"
+        log_step "[dry-run] Would update settings.json"
+        echo ""
+        log_info "[dry-run] No changes made"
+        return 0
+    fi
+
     # Generate custom hook script
     echo ""
     log_step "Creating directories..."
@@ -883,7 +894,15 @@ CUSTOM_HOOK
     # Update settings
     log_step "Updating settings.json..."
     local settings_file="${settings_dir}/settings.json"
-    local hook_path_for_settings="\$HOME/.local/bin/${SCRIPT_NAME}"
+    local hook_path_for_settings
+    local default_hook_dir="$HOME/.local/bin"
+    if [[ "$hook_dir" == "$default_hook_dir" ]]; then
+        # Use $HOME for portability when using default location
+        hook_path_for_settings="\$HOME/.local/bin/${SCRIPT_NAME}"
+    else
+        # Use absolute path for custom HOOK_DIR
+        hook_path_for_settings="$script_path"
+    fi
     add_hook_to_settings "$settings_file" "$hook_path_for_settings" "false" > /dev/null
     log_success "Settings updated"
 
@@ -944,12 +963,13 @@ do_show_template() {
 # Apply a preset template
 # -----------------------------------------------------------------------------
 do_template() {
-    local hook_dir="$1"
-    local template_name="$2"
+    local template_name="$1"
+    local hook_dir="$2"
+    local dry_run="$3"
 
     local script_path="${hook_dir}/${SCRIPT_NAME}"
 
-    print_banner
+    # Note: banner already printed by main()
 
     local chosen_message=""
     case "$template_name" in
@@ -967,6 +987,19 @@ do_template() {
 
     log_info "Applying template: $template_name"
     echo ""
+
+    if [[ "$dry_run" == "true" ]]; then
+        log_step "[dry-run] Would create $script_path with '$template_name' template"
+        echo ""
+        echo -e "${WHITE}${BOLD}Preview:${NC}"
+        echo ""
+        echo -e "  ${CYAN}<post-compact-reminder>${NC}"
+        echo "$chosen_message" | while IFS= read -r line; do
+            echo "  $line"
+        done
+        echo -e "  ${CYAN}</post-compact-reminder>${NC}"
+        return 0
+    fi
 
     mkdir -p "$hook_dir"
 
@@ -1026,7 +1059,7 @@ do_changelog() {
 do_update() {
     local dry_run="$1"
 
-    print_banner
+    # Note: banner already printed by main()
 
     log_info "Checking for updates..."
 
@@ -1110,7 +1143,7 @@ _post_compact_reminder() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    opts="--help -h --version -v --dry-run -n --uninstall --remove --force -f --quiet -q --no-color --status --check --verbose --restore --diff --interactive -i --yes -y --completions --template --show-template --update --changelog --log"
+    opts="--help -h --version -v --dry-run -n --uninstall --remove --force -f --quiet -q --no-color --status --check --verbose -V --restore --diff --interactive -i --yes -y --completions --template --show-template --update --changelog --log"
 
     case "$prev" in
         --template)
@@ -1161,6 +1194,7 @@ _install_post_compact_reminder() {
         '--status[Show installation status]::'
         '--check[Show installation status]::'
         '--verbose[Enable verbose output]::'
+        '-V[Enable verbose output]::'
         '--restore[Restore settings.json from backup]::'
         '--diff[Show changes on upgrade]::'
         '--interactive[Interactive setup mode]::'
@@ -1444,7 +1478,7 @@ main() {
                 show_help
                 exit 0
                 ;;
-            --version)
+            --version|-v)
                 echo "post-compact-reminder v${VERSION}"
                 exit 0
                 ;;

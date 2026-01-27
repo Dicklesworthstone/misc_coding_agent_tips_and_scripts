@@ -10,6 +10,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | [Post-Compact AGENTS.md Reminder](#post-compact-agentsmd-reminder) | Claude forgets project conventions after context compaction | 2 min |
 | [Host-Aware Terminal Colors](#host-aware-color-themes) | Can't tell which terminal is connected to production | 5-15 min |
 | [WezTerm Persistent Sessions](#wezterm-persistent-remote-sessions) | Remote terminal sessions die when Mac sleeps or reboots | 20 min |
+| [WezTerm Mux Tuning for Agent Swarms](#wezterm-mux-tuning-for-agent-swarms) | Mux server becomes unresponsive with 20+ agents | 5 min |
 | [Ghostty Terminfo for Remote Machines](#ghostty-terminfo-for-remote-machines) | Numpad Enter shows `[57414u` garbage when SSH'd | 2 min |
 | [macOS NFS Auto-Mount](#macos-nfs-auto-mount) | Have to manually mount remote dev server after every reboot | 10 min |
 | [Budget 10GbE Direct Link](#budget-10gbe-direct-link) | File transfers crawl at 100MB/s through gigabit switch | 30 min |
@@ -248,6 +249,46 @@ sudo loginctl enable-linger $USER
 </details>
 
 **[Full guide →](WEZTERM_PERSISTENT_REMOTE_SESSIONS.md)**
+
+---
+
+### WezTerm Mux Tuning for Agent Swarms
+
+When running 20+ AI coding agents (Claude, Codex) simultaneously, the default wezterm-mux-server configuration can't keep up. Output buffers overflow, caches thrash, and connections time out, killing all your agent sessions.
+
+This guide provides RAM-tiered performance profiles that trade memory for throughput:
+
+| Setting | Default | 512GB Profile | Why It Helps |
+|:--------|:--------|:--------------|:-------------|
+| `scrollback_lines` | 3,500 | 10,000,000 | Agents produce massive output; don't truncate |
+| `mux_output_parser_buffer_size` | 128KB | 16MB | Batch-process output bursts instead of choking |
+| `mux_output_parser_coalesce_delay_ms` | 3ms | 1ms | Reduce accumulated lag on high-throughput output |
+| `shape_cache_size` | 1,024 | 65,536 | Cache font shaping to avoid CPU spikes |
+
+**Smart sizing:** Uses linear interpolation based on actual RAM, not fixed tiers. A 200GB system gets proportionally scaled settings.
+
+**Bonus:** Emergency rescue procedure to migrate agent sessions to tmux using `reptyr` when the mux server becomes unresponsive (saves ~50-70% of sessions).
+
+<details>
+<summary><strong>Quick install</strong></summary>
+
+```bash
+./wezterm-mux-tune.sh              # Auto-detect RAM, interpolate
+./wezterm-mux-tune.sh --dry-run    # Preview settings
+./wezterm-mux-tune.sh --ram 200    # Specific RAM amount
+./wezterm-mux-tune.sh --profile 256  # Fixed profile
+./wezterm-mux-tune.sh --restore    # Restore backup
+```
+
+Then restart the mux server:
+```bash
+pkill -9 -f wezterm-mux
+wezterm-mux-server --daemonize
+```
+
+</details>
+
+**[Full guide →](WEZTERM_MUX_PERFORMANCE_TUNING_FOR_AGENT_SWARMS.md)** | **[Install script →](wezterm-mux-tune.sh)**
 
 ---
 

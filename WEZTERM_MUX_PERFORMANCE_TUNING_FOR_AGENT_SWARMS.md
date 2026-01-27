@@ -52,26 +52,26 @@ When running AI coding agents (Claude Code, Codex, Gemini CLI), each agent:
 4. **Operates in parallel** — 20+ simultaneous output streams
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     AGENT SWARM PRESSURE                        │
-│                                                                 │
-│   Agent 1    Agent 2    Agent 3         Agent N                 │
-│      │          │          │               │                    │
-│      ▼          ▼          ▼               ▼                    │
-│   ┌─────────────────────────────────────────────────────────┐   │
-│   │              wezterm-mux-server                         │   │
-│   │                                                         │   │
-│   │   Defaults:  128KB buffer  │  3,500 scrollback         │   │
-│   │              1,024 cache   │  50 prefetch/sec          │   │
-│   │                                                         │   │
-│   │   Problem:   Buffers overflow → parser bottleneck       │   │
-│   │              Caches thrash  → CPU spikes                │   │
-│   │              Result: UNRESPONSIVE SERVER                │   │
-│   └─────────────────────────────────────────────────────────┘   │
-│                            │                                    │
-│                            ▼                                    │
-│              Connection Timeout / Session Loss                  │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                     AGENT SWARM PRESSURE                      │
+│                                                               │
+│   Agent 1    Agent 2    Agent 3    ...    Agent N             │
+│      │          │          │                 │                │
+│      ▼          ▼          ▼                 ▼                │
+│   ┌───────────────────────────────────────────────────────┐   │
+│   │                  wezterm-mux-server                   │   │
+│   │                                                       │   │
+│   │   Defaults:  128KB buffer  │  3,500 scrollback        │   │
+│   │              1,024 cache   │  50 prefetch/sec         │   │
+│   │                                                       │   │
+│   │   Problem:   Buffers overflow → parser bottleneck     │   │
+│   │              Caches thrash  → CPU spikes              │   │
+│   │              Result: UNRESPONSIVE SERVER              │   │
+│   └───────────────────────────────────────────────────────┘   │
+│                             │                                 │
+│                             ▼                                 │
+│             Connection Timeout / Session Loss                 │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ### Default vs Reality

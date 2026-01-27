@@ -2,9 +2,16 @@
 
 > **TL;DR:** Running 20+ AI agents overwhelms wezterm-mux-server defaults. This guide provides RAM-optimized configs that trade memory for throughput, with linear interpolation for any RAM size.
 
+**Quick Start:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/wezterm-mux-tune.sh | bash
 ```
-Quick Start:  curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/wezterm-mux-tune.sh | bash
-              Then:  pkill -9 -f wezterm-mux && wezterm-mux-server --daemonize
+
+Then restart the mux server:
+
+```bash
+pkill -9 -f wezterm-mux && wezterm-mux-server --daemonize
 ```
 
 ---

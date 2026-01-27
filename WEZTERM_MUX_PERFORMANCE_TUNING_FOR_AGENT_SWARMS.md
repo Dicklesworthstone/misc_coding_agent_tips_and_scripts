@@ -214,8 +214,7 @@ config.glyph_cache_image_cache_size = 4096
 
 ### Profile: 64GB RAM (Conservative)
 
-<details>
-<summary><strong>View configuration</strong> — Est. 3-8 GB under load</summary>
+Est. 3-8 GB memory under load.
 
 ```lua
 -- ============================================================
@@ -232,14 +231,11 @@ config.line_to_ele_shape_cache_size = 8192
 config.glyph_cache_image_cache_size = 512
 ```
 
-</details>
-
 ---
 
 ### Profile: 128GB RAM (Moderate)
 
-<details>
-<summary><strong>View configuration</strong> — Est. 5-15 GB under load</summary>
+Est. 5-15 GB memory under load.
 
 ```lua
 -- ============================================================
@@ -256,14 +252,11 @@ config.line_to_ele_shape_cache_size = 16384
 config.glyph_cache_image_cache_size = 1024
 ```
 
-</details>
-
 ---
 
 ### Profile: 256GB RAM (Aggressive)
 
-<details>
-<summary><strong>View configuration</strong> — Est. 8-25 GB under load</summary>
+Est. 8-25 GB memory under load.
 
 ```lua
 -- ============================================================
@@ -280,14 +273,11 @@ config.line_to_ele_shape_cache_size = 32768
 config.glyph_cache_image_cache_size = 2048
 ```
 
-</details>
-
 ---
 
 ### Profile: 512GB RAM (Maximum)
 
-<details>
-<summary><strong>View configuration</strong> — Est. 15-60 GB under load</summary>
+Est. 15-60 GB memory under load.
 
 ```lua
 -- ============================================================
@@ -303,8 +293,6 @@ config.line_quad_cache_size = 65536
 config.line_to_ele_shape_cache_size = 65536
 config.glyph_cache_image_cache_size = 4096
 ```
-
-</details>
 
 ---
 
@@ -372,9 +360,6 @@ Agent processes are attached to wezterm's PTYs. Kill wezterm → PTYs close → 
 
 ### Procedure
 
-<details>
-<summary><strong>Full rescue script</strong></summary>
-
 ```bash
 # 1. Connect via plain SSH (bypass broken mux)
 ssh user@host
@@ -415,8 +400,6 @@ wezterm-mux-server --daemonize
 # 11. Attach to rescued sessions
 tmux attach -t rescue
 ```
-
-</details>
 
 ### Success Rate
 

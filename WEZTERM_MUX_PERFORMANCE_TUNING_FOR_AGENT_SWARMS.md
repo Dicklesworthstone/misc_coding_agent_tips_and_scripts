@@ -2,13 +2,15 @@
 
 > **TL;DR:** Running 20+ AI agents overwhelms wezterm-mux-server defaults. This guide provides RAM-optimized configs that trade memory for throughput, with linear interpolation for any RAM size.
 
-**Quick Start:**
+## Quick Start
+
+**1. Install tuned settings:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/wezterm-mux-tune.sh | bash
 ```
 
-Then restart the mux server:
+**2. Restart the mux server:**
 
 ```bash
 pkill -9 -f wezterm-mux && wezterm-mux-server --daemonize
@@ -18,27 +20,27 @@ pkill -9 -f wezterm-mux && wezterm-mux-server --daemonize
 
 ## At a Glance
 
-| Setting | Default | 512GB Profile | Effect |
-|:--------|--------:|-------------:|:-------|
-| `scrollback_lines` | 3,500 | 10,000,000 | History per pane |
-| `mux_output_parser_buffer_size` | 128 KB | 16 MB | Output batch size |
+| Setting | Default | 512GB | What It Does |
+|:--------|--------:|------:|:-------------|
+| `scrollback_lines` | 3,500 | 10M | History lines per pane |
+| `mux_output_parser_buffer_size` | 128 KB | 16 MB | PTY output batch size |
 | `mux_output_parser_coalesce_delay_ms` | 3 ms | 1 ms | Parse latency |
 | `ratelimit_mux_line_prefetches_per_second` | 50 | 1,000 | Scroll speed |
 | `shape_cache_size` | 1,024 | 65,536 | Font shaping cache |
 
-**Profiles:** [64GB](#profile-64gb-ram-conservative) ・ [128GB](#profile-128gb-ram-moderate) ・ [256GB](#profile-256gb-ram-aggressive) ・ [512GB](#profile-512gb-ram-maximum)
+**Jump to profile:** [64GB](#profile-64gb-ram-conservative) | [128GB](#profile-128gb-ram-moderate) | [256GB](#profile-256gb-ram-aggressive) | [512GB](#profile-512gb-ram-maximum)
 
 ---
 
 ## Table of Contents
 
-- [The Problem](#the-agent-swarm-problem)
-- [Settings Explained](#how-each-setting-helps)
-- [Configuration Profiles](#tiered-configuration-profiles)
-- [Installation](#installation)
-- [Emergency Rescue](#emergency-session-rescue)
-- [Monitoring](#monitoring-and-diagnostics)
-- [Troubleshooting](#troubleshooting)
+1. [The Problem](#the-agent-swarm-problem)
+2. [Settings Explained](#how-each-setting-helps)
+3. [Configuration Profiles](#tiered-configuration-profiles)
+4. [Installation](#installation)
+5. [Emergency Rescue](#emergency-session-rescue)
+6. [Monitoring](#monitoring-and-diagnostics)
+7. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -46,50 +48,56 @@ pkill -9 -f wezterm-mux && wezterm-mux-server --daemonize
 
 When running AI coding agents (Claude Code, Codex, Gemini CLI), each agent:
 
-1. **Produces continuous output** — tool calls, code diffs, test results
-2. **Runs for hours** — accumulating massive scrollback
-3. **Spawns subprocesses** — tests, builds, linters
-4. **Operates in parallel** — 20+ simultaneous output streams
+| Behavior | Impact |
+|:---------|:-------|
+| Produces continuous output | Tool calls, code diffs, test results |
+| Runs for hours | Accumulates massive scrollback |
+| Spawns subprocesses | Tests, builds, linters |
+| Operates in parallel | 20+ simultaneous output streams |
 
 ```
-┌───────────────────────────────────────────────────────────────┐
-│                     AGENT SWARM PRESSURE                      │
-│                                                               │
-│   Agent 1    Agent 2    Agent 3    ...    Agent N             │
-│      │          │          │                 │                │
-│      ▼          ▼          ▼                 ▼                │
-│   ┌───────────────────────────────────────────────────────┐   │
-│   │                  wezterm-mux-server                   │   │
-│   │                                                       │   │
-│   │   Defaults:  128KB buffer  │  3,500 scrollback        │   │
-│   │              1,024 cache   │  50 prefetch/sec         │   │
-│   │                                                       │   │
-│   │   Problem:   Buffers overflow → parser bottleneck     │   │
-│   │              Caches thrash  → CPU spikes              │   │
-│   │              Result: UNRESPONSIVE SERVER              │   │
-│   └───────────────────────────────────────────────────────┘   │
-│                             │                                 │
-│                             ▼                                 │
-│             Connection Timeout / Session Loss                 │
-└───────────────────────────────────────────────────────────────┘
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                               AGENT SWARM PRESSURE                              ┃
+┃                                                                                 ┃
+┃   Agent 1      Agent 2      Agent 3       ⋯       Agent N                       ┃
+┃     │            │            │                    │                            ┃
+┃     ▼            ▼            ▼                    ▼                            ┃
+┃   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓   ┃
+┃   ┃                            wezterm-mux-server                           ┃   ┃
+┃   ┃─────────────────────────────────────────────────────────────────────────┃   ┃
+┃   ┃   Defaults                                                              ┃   ┃
+┃   ┃  • Buffer:     128KB      │  • Scrollback:   3,500 lines                ┃   ┃
+┃   ┃  • Cache:      1,024      │  • Prefetch:     50 / sec                   ┃   ┃
+┃   ┃                                                                         ┃   ┃
+┃   ┃   Problem                                                               ┃   ┃
+┃   ┃  • Buffers overflow  → parser bottleneck                                ┃   ┃
+┃   ┃  • Caches thrash     → CPU spikes                                       ┃   ┃
+┃   ┃  • Result            → UNRESPONSIVE SERVER                              ┃   ┃
+┃   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛   ┃
+┃                                        │                                        ┃
+┃                                        ▼                                        ┃
+┃                        Connection Timeout / Session Loss                        ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ```
 
-### Default vs Reality
+### Default Assumptions vs Reality
 
-| Assumption | Reality with Swarms |
-|:-----------|:--------------------|
+| WezTerm Assumes | Reality with Agent Swarms |
+|:----------------|:--------------------------|
 | ~100 lines/sec | 1,000+ lines/sec across panes |
-| Occasional scrollback | Scrollback is primary debug tool |
+| Occasional scrollback access | Scrollback is primary debug tool |
 | Few panes | 20+ panes, all active |
-| Cache hits common | Rapid changes → cache misses |
+| Cache hits common | Rapid context switches = cache misses |
 
-### Failure Cascade
+### The Failure Cascade
 
-1. Output buffer fills → parser falls behind
-2. Coalesce delay accumulates → lag builds
-3. Caches thrash → CPU spikes on render
-4. Socket buffers fill → connection hangs
-5. You restart mux → **all sessions die**
+```
+1. Output buffer fills        →  parser falls behind
+2. Coalesce delay accumulates →  lag builds up
+3. Caches thrash              →  CPU spikes on render
+4. Socket buffers fill        →  connection hangs
+5. You restart mux            →  ALL SESSIONS DIE
+```
 
 ---
 
@@ -97,16 +105,16 @@ When running AI coding agents (Claude Code, Codex, Gemini CLI), each agent:
 
 ### `scrollback_lines`
 
-| | |
+|   |   |
 |:--|:--|
 | **Default** | 3,500 |
 | **Purpose** | Maximum history lines per pane |
 | **Problem** | A single `cargo build` produces 10,000+ lines |
 
-**Recommended values:**
+**Recommended by RAM:**
 
 | RAM | Value | Memory Headroom |
-|----:|------:|:----------------|
+|----:|------:|----------------:|
 | 64 GB | 1,000,000 | ~6 GB |
 | 128 GB | 2,000,000 | ~12 GB |
 | 256 GB | 5,000,000 | ~30 GB |
@@ -120,13 +128,13 @@ config.scrollback_lines = 10000000
 
 ### `mux_output_parser_buffer_size`
 
-| | |
+|   |   |
 |:--|:--|
 | **Default** | 128 KB |
 | **Purpose** | Buffer for raw PTY output before parsing |
 | **Problem** | Small buffer forces frequent small parses |
 
-**Recommended values:**
+**Recommended by RAM:**
 
 | RAM | Value | Handles |
 |----:|------:|:--------|
@@ -143,13 +151,13 @@ config.mux_output_parser_buffer_size = 16 * 1024 * 1024
 
 ### `mux_output_parser_coalesce_delay_ms`
 
-| | |
+|   |   |
 |:--|:--|
 | **Default** | 3 ms |
 | **Purpose** | Wait time to batch fragmented writes |
 | **Problem** | 3ms × 1,000 chunks/sec = 3 sec accumulated lag |
 
-**Recommended values:**
+**Recommended by use case:**
 
 | Use Case | Value |
 |:---------|------:|
@@ -165,13 +173,13 @@ config.mux_output_parser_coalesce_delay_ms = 1
 
 ### `ratelimit_mux_line_prefetches_per_second`
 
-| | |
+|   |   |
 |:--|:--|
 | **Default** | 50 |
 | **Purpose** | Scroll prefetch rate |
 | **Problem** | At 50/sec, scrolling 10,000 lines takes 200 seconds |
 
-**Recommended:** 500–1000 for all systems
+**Recommended:** 500-1000 for all systems.
 
 ```lua
 config.ratelimit_mux_line_prefetches_per_second = 1000
@@ -191,7 +199,7 @@ WezTerm maintains several caches to avoid expensive recomputation:
 | `line_to_ele_shape_cache_size` | 1,024 | Line-to-element mapping |
 | `glyph_cache_image_cache_size` | 256 | Rasterized glyphs |
 
-**Recommended values by RAM:**
+**Recommended by RAM:**
 
 | RAM | shape | line_state | line_quad | line_to_ele | glyph |
 |----:|------:|-----------:|----------:|------------:|------:|
@@ -214,7 +222,7 @@ config.glyph_cache_image_cache_size = 4096
 
 ### Profile: 64GB RAM (Conservative)
 
-Est. 3-8 GB memory under load.
+Memory footprint: **3-8 GB** under load.
 
 ```lua
 -- ============================================================
@@ -235,7 +243,7 @@ config.glyph_cache_image_cache_size = 512
 
 ### Profile: 128GB RAM (Moderate)
 
-Est. 5-15 GB memory under load.
+Memory footprint: **5-15 GB** under load.
 
 ```lua
 -- ============================================================
@@ -256,7 +264,7 @@ config.glyph_cache_image_cache_size = 1024
 
 ### Profile: 256GB RAM (Aggressive)
 
-Est. 8-25 GB memory under load.
+Memory footprint: **8-25 GB** under load.
 
 ```lua
 -- ============================================================
@@ -277,7 +285,7 @@ config.glyph_cache_image_cache_size = 2048
 
 ### Profile: 512GB RAM (Maximum)
 
-Est. 15-60 GB memory under load.
+Memory footprint: **15-60 GB** under load.
 
 ```lua
 -- ============================================================
@@ -308,16 +316,15 @@ The script uses **linear interpolation** to calculate optimal settings based on 
 
 **Script options:**
 
-```bash
-./wezterm-mux-tune.sh              # Auto-detect RAM, interpolate settings
-./wezterm-mux-tune.sh --dry-run    # Preview without applying
-./wezterm-mux-tune.sh --ram 200    # Calculate for specific RAM amount
-./wezterm-mux-tune.sh --profile 256  # Use exact fixed profile
-./wezterm-mux-tune.sh --restore    # Restore from backup
-./wezterm-mux-tune.sh --help       # Show all options
-```
+| Flag | Description |
+|:-----|:------------|
+| `--dry-run` | Preview without applying |
+| `--ram 200` | Calculate for specific RAM amount |
+| `--profile 256` | Use exact fixed profile |
+| `--restore` | Restore from backup |
+| `--help` | Show all options |
 
-**Anchor points for interpolation:**
+**Interpolation anchor points:**
 
 | RAM | scrollback | buffer | caches | prefetch |
 |----:|-----------:|-------:|-------:|---------:|
@@ -328,21 +335,23 @@ The script uses **linear interpolation** to calculate optimal settings based on 
 
 Values extrapolate linearly beyond this range (e.g., 768GB gets ~15M scrollback, 24MB buffer).
 
-### Manual
+### Manual Installation
 
-1. **Backup:**
-   ```bash
-   cp ~/.wezterm.lua ~/.wezterm.lua.backup
-   ```
+**Step 1.** Backup your config:
 
-2. **Edit** `~/.wezterm.lua` — add profile before `return config`
+```bash
+cp ~/.wezterm.lua ~/.wezterm.lua.backup
+```
 
-3. **Restart mux:**
-   ```bash
-   pkill -9 -f wezterm-mux && wezterm-mux-server --daemonize
-   ```
+**Step 2.** Edit `~/.wezterm.lua` and add a profile before `return config`
 
-4. **Reconnect** your client
+**Step 3.** Restart the mux server:
+
+```bash
+pkill -9 -f wezterm-mux && wezterm-mux-server --daemonize
+```
+
+**Step 4.** Reconnect your client
 
 ---
 
@@ -352,13 +361,17 @@ Values extrapolate linearly beyond this range (e.g., 768GB gets ~15M scrollback,
 
 ### Why This Is Hard
 
-Agent processes are attached to wezterm's PTYs. Kill wezterm → PTYs close → agents die.
+Agent processes are attached to wezterm's PTYs:
+
+```
+Kill wezterm  →  PTYs close  →  Agents receive SIGHUP  →  Agents die
+```
 
 ### Solution: `reptyr -T`
 
 `reptyr` can steal terminal attachments via ptrace. The `-T` flag handles processes with subprocesses.
 
-### Procedure
+### Rescue Procedure
 
 ```bash
 # 1. Connect via plain SSH (bypass broken mux)
@@ -403,14 +416,14 @@ tmux attach -t rescue
 
 ### Success Rate
 
-Typically **50–70%** of sessions migrate successfully.
+Typically **50-70%** of sessions migrate successfully.
 
-| Factor | Impact |
-|:-------|:-------|
-| Process age | Older = more reliable |
-| Subprocess count | Fewer = better |
-| Activity level | Idle = better |
-| Protections | Some block ptrace |
+| Factor | Better | Worse |
+|:-------|:-------|:------|
+| Process age | Older | Newer |
+| Subprocess count | Fewer | Many |
+| Activity level | Idle | Active |
+| Security | Default | Hardened |
 
 ---
 
@@ -419,7 +432,7 @@ Typically **50–70%** of sessions migrate successfully.
 ### Mux Server Health
 
 ```bash
-# Running?
+# Is it running?
 ps aux | grep wezterm-mux | grep -v grep
 
 # Recent logs
@@ -454,10 +467,10 @@ watch -n1 'ps aux | grep wezterm-mux | grep -v grep | awk "{print \"RSS: \" \$6/
 
 | Symptom | Cause | Fix |
 |:--------|:------|:----|
-| Connection timeout | Buffer overflow | ↑ `mux_output_parser_buffer_size` |
-| Laggy scrolling | Low prefetch rate | ↑ `ratelimit_mux_line_prefetches_per_second` |
-| High CPU on render | Cache thrashing | ↑ all cache sizes |
-| Truncated history | Small scrollback | ↑ `scrollback_lines` |
+| Connection timeout | Buffer overflow | Increase `mux_output_parser_buffer_size` |
+| Laggy scrolling | Low prefetch rate | Increase `ratelimit_mux_line_prefetches_per_second` |
+| High CPU on render | Cache thrashing | Increase all cache sizes |
+| Truncated history | Small scrollback | Increase `scrollback_lines` |
 | "Broken pipe" in logs | Client disconnect | Check network stability |
 | reptyr "Operation not permitted" | ptrace blocked | `sudo sysctl -w kernel.yama.ptrace_scope=0` |
 

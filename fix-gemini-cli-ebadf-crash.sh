@@ -57,18 +57,54 @@ fail()    { printf "  ${CROSS}  ${RED}${BOLD}%s${RESET}\n" "$*"; exit 1; }
 step()    { printf "\n  ${ARROW}  ${WHITE}%s${RESET}\n" "$*"; }
 detail()  { printf "     ${DIM}%s${RESET}\n" "$*"; }
 
-# ── Banner ──────────────────────────────────────────────────────────────────
+# ── Box drawing (emoji-free for guaranteed alignment) ─────────────────────
+
+BOX_W=64
+
+_box_rule() { local r; printf -v r '%*s' "$BOX_W" ''; echo "${r// /═}"; }
+_box_dash() { local r; printf -v r '%*s' "$((BOX_W - 6))" ''; echo "${r// /─}"; }
+
+box_top()    { printf "  ${BOLD}${CYAN}╔%s╗${RESET}\n" "$(_box_rule)"; }
+box_bottom() { printf "  ${BOLD}${CYAN}╚%s╝${RESET}\n" "$(_box_rule)"; }
+box_empty()  { printf "  ${BOLD}${CYAN}║${RESET}%*s${BOLD}${CYAN}║${RESET}\n" "$BOX_W" ""; }
+box_sep()    { printf "  ${BOLD}${CYAN}║${RESET}   ${DIM}%s${RESET}   ${BOLD}${CYAN}║${RESET}\n" "$(_box_dash)"; }
+
+# box_line PLAIN [FORMATTED]
+# PLAIN = visible chars only (no ANSI, no emojis) for width calculation.
+# FORMATTED = same content with ANSI color codes. If omitted, uses PLAIN.
+box_line() {
+    local plain="$1" fmt="${2:-$1}"
+    local pad=$((BOX_W - ${#plain}))
+    (( pad < 0 )) && pad=0
+    printf "  ${BOLD}${CYAN}║${RESET}%b%*s${BOLD}${CYAN}║${RESET}\n" "$fmt" "$pad" ""
+}
+
+summary_rule() {
+    local r; printf -v r '%*s' "$((BOX_W + 2))" ''; printf "  ${BOLD}${CYAN}%s${RESET}\n" "${r// /═}"
+}
+
+# ── Banner ────────────────────────────────────────────────────────────────
 
 banner() {
     printf "\n"
-    printf "  ${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════╗${RESET}\n"
-    printf "  ${BOLD}${CYAN}║${RESET}  ${WRENCH} ${BOLD}Gemini CLI Patcher${RESET}                                        ${BOLD}${CYAN}║${RESET}\n"
-    printf "  ${BOLD}${CYAN}║${RESET}                                                               ${BOLD}${CYAN}║${RESET}\n"
-    printf "  ${BOLD}${CYAN}║${RESET}  ${BUG} Fix 1: EBADF crash during PTY resize                     ${BOLD}${CYAN}║${RESET}\n"
-    printf "  ${BOLD}${CYAN}║${RESET}  ${RETRY} Fix 2: Rate-limit retry gives up way too easily           ${BOLD}${CYAN}║${RESET}\n"
-    printf "  ${BOLD}${CYAN}║${RESET}                                                               ${BOLD}${CYAN}║${RESET}\n"
-    printf "  ${BOLD}${CYAN}║${RESET}  ${DIM}Patches @google/gemini-cli + gemini-cli-core in node_modules${RESET} ${BOLD}${CYAN}║${RESET}\n"
-    printf "  ${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════╝${RESET}\n"
+    box_top
+    box_empty
+    box_line \
+        "   GEMINI CLI PATCHER" \
+        "   ${BOLD}${WHITE}GEMINI CLI PATCHER${RESET}"
+    box_sep
+    box_empty
+    box_line \
+        "     ▸ Fix EBADF crash on PTY resize" \
+        "     ${RED}▸${RESET} Fix EBADF crash on PTY resize"
+    box_line \
+        "     ▸ Rate-limit retries: 3 → 1000, fast backoff" \
+        "     ${YELLOW}▸${RESET} Rate-limit retries: 3 ${YELLOW}→${RESET} 1000, fast backoff"
+    box_line \
+        "     ▸ Quota errors retry instead of giving up" \
+        "     ${GREEN}▸${RESET} Quota errors retry instead of giving up"
+    box_empty
+    box_bottom
     printf "\n"
 }
 
@@ -78,7 +114,7 @@ MODE="patch"
 case "${1:-}" in
     --check)  MODE="check" ;;
     --verify) MODE="verify" ;;
-    --revert) MODE="revert" ;;
+    --revert|--uninstall) MODE="revert" ;;
     --help|-h)
         banner
         printf "  ${BOLD}Usage:${RESET}\n"
@@ -86,6 +122,7 @@ case "${1:-}" in
         printf "    %s --check      ${DIM}# check if patches are needed (no changes)${RESET}\n" "$(basename "$0")"
         printf "    %s --verify     ${DIM}# reproduce the EBADF bug to confirm it exists${RESET}\n" "$(basename "$0")"
         printf "    %s --revert     ${DIM}# undo all patches (restore originals)${RESET}\n" "$(basename "$0")"
+        printf "    %s --uninstall  ${DIM}# same as --revert${RESET}\n" "$(basename "$0")"
         printf "\n"
         printf "  ${BOLD}What it fixes:${RESET}\n"
         printf "    ${BUG}  ${BOLD}EBADF crash${RESET} — ioctl(2) on closed PTY fd crashes the CLI\n"
@@ -215,6 +252,15 @@ check_file "$SHELL_SVC"    "shellExecutionService.js"
 check_file "$APP_CONTAINER" "AppContainer.js"
 check_file "$RETRY_JS"      "retry.js"
 
+# ── Utility: check if a file contains a string ────────────────────────────
+
+node_contains() {
+    node -e "
+        const fs = require('fs');
+        process.exit(fs.readFileSync(process.argv[1],'utf8').includes(process.argv[2]) ? 0 : 1);
+    " "$1" "$2" 2>/dev/null
+}
+
 # ── Verify mode ─────────────────────────────────────────────────────────────
 
 if [[ "$MODE" == "verify" ]]; then
@@ -291,6 +337,14 @@ if [[ "$MODE" == "verify" ]]; then
         elif [[ "$MAX_ATTEMPTS" == "1000" ]]; then
             ok "Already patched to 1000 attempts"
         fi
+
+        step "Checking TerminalQuotaError behavior"
+        if node_contains "$RETRY_JS" "// PATCHED: treat TerminalQuotaError as retryable"; then
+            ok "TerminalQuotaError retries with backoff (patched)"
+        else
+            printf "     ${YELLOW}TerminalQuotaError causes immediate give-up (unpatched).${RESET}\n"
+            printf "     ${YELLOW}Run this script to make it retry with backoff.${RESET}\n"
+        fi
     else
         warn "retry.js not found"
     fi
@@ -309,13 +363,6 @@ inc_patched() { patched=$((patched + 1)); }
 inc_skipped() { skipped=$((skipped + 1)); }
 inc_failed()  { failed=$((failed + 1));  }
 inc_total()   { total=$((total + 1)); }
-
-node_contains() {
-    node -e "
-        const fs = require('fs');
-        process.exit(fs.readFileSync(process.argv[1],'utf8').includes(process.argv[2]) ? 0 : 1);
-    " "$1" "$2" 2>/dev/null
-}
 
 node_replace() {
     node -e "
@@ -527,7 +574,7 @@ patch_file "$RETRY_JS" "$P4_MARKER" "$P4_OLD" "$P4_NEW" "retry.js no-terminal-ba
 # ── Summary ─────────────────────────────────────────────────────────────────
 
 printf "\n"
-printf "  ${BOLD}${CYAN}══════════════════════════════════════════════════════════${RESET}\n"
+summary_rule
 
 case "$MODE" in
     patch)
@@ -569,7 +616,7 @@ case "$MODE" in
         ;;
 esac
 
-printf "  ${BOLD}${CYAN}══════════════════════════════════════════════════════════${RESET}\n"
+summary_rule
 
 if [[ "$MODE" != "check" ]]; then
     printf "\n"

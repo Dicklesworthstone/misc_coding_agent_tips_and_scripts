@@ -24,6 +24,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | [Moonlight Streaming](#moonlight-streaming-configuration) | Remote desktop to Linux workstation with AV1 encoding | 30 min |
 | [Vault HA Cluster](#hashicorp-vault-ha-cluster) | Single Vault instance is a single point of failure | 45 min |
 | [DevOps CLI Tools](#devops-cli-tools) | Clicking through web dashboards wastes time | 15 min |
+| [Gemini CLI Crash + Retry Fix](#gemini-cli-crash--retry-fix) | Gemini CLI crashes with EBADF and gives up after 3 retries | 10 sec |
 
 ---
 
@@ -588,6 +589,65 @@ bd config set sync.branch beads-sync
 ```
 
 **[Full guide →](BEADS_SETUP.md)**
+
+---
+
+### Gemini CLI Crash + Retry Fix
+
+Google's Gemini CLI (`@google/gemini-cli`) has two bugs that make it nearly unusable in practice:
+
+1. **EBADF crash on every launch** (wide terminals): The CLI uses `node-pty` for shell execution. A React `useEffect` fires `resizePty()` after the PTY's file descriptor is already closed. The native C++ addon throws `Error("ioctl(2) failed, EBADF")`, but the catch blocks only check `err.code === 'ESRCH'` — the native addon sets **no `.code` property** (only `.message`), so the error falls through and crashes the entire CLI.
+
+2. **"Sorry there's high demand" gives up after 3 tries**: The default retry config (`DEFAULT_MAX_ATTEMPTS = 3`, `maxDelayMs = 30000`) means Gemini gives up after ~45 seconds. Worse, `TerminalQuotaError` (which fires for daily limits **and** temporary overload) bypasses retry entirely and immediately surrenders.
+
+**One-liner fix:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/fix-gemini-cli-ebadf-crash.sh | bash
+```
+
+**What it patches (4 files, all idempotent):**
+
+| Patch | File | Change |
+|:------|:-----|:-------|
+| EBADF catch #1 | `shellExecutionService.js` | Add `err.message?.includes('EBADF')` to `resizePty()` catch |
+| EBADF catch #2 | `AppContainer.js` | Add `EBADF` + `ESRCH` checks to React useEffect catch |
+| Aggressive retry | `retry.js` | `maxAttempts` 3 → 1000, `initialDelay` 5s → 1s, `maxDelay` 30s → 5s |
+| Never bail on quota | `retry.js` | `TerminalQuotaError` retries with backoff instead of immediately giving up |
+
+<details>
+<summary><strong>Other modes</strong></summary>
+
+```bash
+./fix-gemini-cli-ebadf-crash.sh --check   # check if patches are needed (no changes)
+./fix-gemini-cli-ebadf-crash.sh --verify  # reproduce the EBADF bug + show retry config
+./fix-gemini-cli-ebadf-crash.sh --revert  # undo all patches
+```
+
+</details>
+
+<details>
+<summary><strong>How the EBADF bug was diagnosed</strong></summary>
+
+```bash
+$ node -e "const pty = require('@lydell/node-pty-linux-x64/pty.node'); \
+  try { pty.resize(-1, 80, 24); } catch(e) { \
+    console.log('message:', e.message); \
+    console.log('code:', e.code); \
+    console.log('has code:', 'code' in e); }"
+
+message: ioctl(2) failed, EBADF
+code: undefined
+has code: false
+```
+
+The native addon throws a plain `Error` with `"EBADF"` only in the message string. The existing catch checks `err.code === 'ESRCH'` which is `undefined === 'ESRCH'` → `false`. The error falls through and crashes React's commit phase.
+
+</details>
+
+**Note:** Patches live in `node_modules` and will be overwritten by package updates. Re-run the script after `bun update -g @google/gemini-cli`.
+
+**[Script source →](fix-gemini-cli-ebadf-crash.sh)**
 
 ---
 

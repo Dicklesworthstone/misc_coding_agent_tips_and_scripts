@@ -26,6 +26,7 @@ set -euo pipefail
 #   ./fix-gemini-cli-ebadf-crash.sh --check   # check status without patching
 #   ./fix-gemini-cli-ebadf-crash.sh --verify  # verify the EBADF bug exists
 #   ./fix-gemini-cli-ebadf-crash.sh --revert  # undo all patches
+#   ./fix-gemini-cli-ebadf-crash.sh --uninstall  # same as --revert
 #
 # Idempotent: safe to run multiple times. Re-run after `npm/bun update`.
 # Cross-platform: macOS, Linux, WSL. Uses node for string replacement.
@@ -454,8 +455,8 @@ P1_NEW="const isEsrch = err.code === 'ESRCH';
                 const isEbadf = err.code === 'EBADF' || err.message?.includes('EBADF');
                 const isWindowsPtyError = err.message?.includes('Cannot resize a pty that has already exited');
                 if (isEsrch || isEbadf || isWindowsPtyError) {
-                    // On Unix, we get ESRCH (process gone) or EBADF (fd already closed).
-                    // Native pty addon throws Error with 'EBADF' in message (no .code).
+                    // On Unix, we get an ESRCH error (process gone) or EBADF (fd closed).
+                    // Native pty addon throws Error with message containing 'EBADF' (no .code).
                     // On Windows, we get a message-based error.
                     // In all cases, it's safe to ignore."
 

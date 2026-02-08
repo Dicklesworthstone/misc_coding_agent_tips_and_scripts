@@ -606,7 +606,7 @@ Google's Gemini CLI (`@google/gemini-cli`) has two bugs that make it nearly unus
 curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/fix-gemini-cli-ebadf-crash.sh | bash
 ```
 
-**What it patches (4 files, all idempotent):**
+**What it patches (4 patches across 3 files, all idempotent):**
 
 | Patch | File | Change |
 |:------|:-----|:-------|

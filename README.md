@@ -619,9 +619,10 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent
 <summary><strong>Other modes</strong></summary>
 
 ```bash
-./fix-gemini-cli-ebadf-crash.sh --check   # check if patches are needed (no changes)
-./fix-gemini-cli-ebadf-crash.sh --verify  # reproduce the EBADF bug + show retry config
-./fix-gemini-cli-ebadf-crash.sh --revert  # undo all patches
+./fix-gemini-cli-ebadf-crash.sh --check     # check if patches are needed (no changes)
+./fix-gemini-cli-ebadf-crash.sh --verify    # reproduce the EBADF bug + show retry config
+./fix-gemini-cli-ebadf-crash.sh --revert    # undo all patches
+./fix-gemini-cli-ebadf-crash.sh --uninstall # same as --revert
 ```
 
 </details>

@@ -25,6 +25,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | [Vault HA Cluster](#hashicorp-vault-ha-cluster) | Single Vault instance is a single point of failure | 45 min |
 | [DevOps CLI Tools](#devops-cli-tools) | Clicking through web dashboards wastes time | 15 min |
 | [Gemini CLI Crash + Retry Fix](#gemini-cli-crash--retry-fix) | Gemini CLI crashes with EBADF and gives up after 3 retries | 10 sec |
+| [Zellij Scroll Wheel Fix](#zellij-scroll-wheel-fix) | Mouse wheel triggers atuin instead of scrollback in Zellij over SSH | 10 min |
 
 ---
 
@@ -374,6 +375,57 @@ theme = doodlestein-punk-theme-for-ghostty
 </details>
 
 **[Theme file →](doodlestein-punk-theme-for-ghostty)**
+
+---
+
+### Zellij Scroll Wheel Fix
+
+> **Problem:** When SSH'd into a remote Linux machine running Zellij as the terminal multiplexer, the mouse scroll wheel sends arrow keys instead of scrolling the terminal buffer. If you use atuin for shell history, the up arrow opens a full-screen history TUI on every scroll.
+
+This is a [known Zellij limitation](https://github.com/zellij-org/zellij/issues/3941) — Zellij receives proper mouse scroll events but converts them to arrow key presses. The workaround uses Hammerspoon on macOS to intercept scroll wheel events and convert them to `Alt+Up`/`Alt+Down` keystrokes, which Zellij handles as scroll commands.
+
+```
+Scroll wheel → Hammerspoon (macOS) → Alt+Up/Down → SSH → Zellij → ScrollUp/ScrollDown
+```
+
+**Three components:**
+
+| Component | Where | What It Does |
+|:----------|:------|:-------------|
+| Zellij keybinds | Remote server | `Alt+Up`/`Alt+Down` → `ScrollUp`/`ScrollDown` in locked mode |
+| Hammerspoon | Mac | Scroll wheel → `Alt+Up`/`Alt+Down` when terminal is focused |
+| Atuin flag | Remote server | `--disable-up-arrow` prevents stray arrows from triggering history |
+
+<details>
+<summary><strong>Quick Zellij config</strong></summary>
+
+```kdl
+keybinds clear-defaults=true {
+    locked {
+        bind "Ctrl g" { SwitchToMode "Normal"; }
+        bind "Alt Up" { ScrollUp; }
+        bind "Alt Down" { ScrollDown; }
+    }
+    // ...
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Hammerspoon gotchas</strong></summary>
+
+Three things that will silently break your event tap:
+
+1. **`local` variables** get garbage collected by Lua, killing the tap after 30-90 min. Use **global** variables.
+2. **Calling `:post()` or `keyStroke()` inside the callback** makes it too slow. Return events as a **table** (second return value) instead.
+3. **macOS `tapDisabledByTimeout`** kills slow taps. Add a **watchdog timer** that re-enables it every 5 seconds.
+
+</details>
+
+The guide also covers why WezTerm's native `mouse_bindings` don't reliably work for this, and how to tune scroll sensitivity with smooth scrolling mice.
+
+**[Full guide →](ZELLIJ_SCROLL_WHEEL_FIX.md)**
 
 ---
 

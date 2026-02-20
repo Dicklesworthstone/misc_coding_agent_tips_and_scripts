@@ -13,7 +13,8 @@ set -euo pipefail
 #     closed. The existing catch blocks only check err.code === 'ESRCH', but the
 #     native addon puts "EBADF" only in .message (no .code property). The error
 #     falls through and crashes the entire CLI.
-#     FIX: Add err.message?.includes('EBADF') to both catch sites.
+#     FIX: Add err.message?.includes('EBADF') to both catch sites + at the
+#          native pty.resize() source in unixTerminal.js (belt-and-suspenders).
 #
 #  2. RATE LIMIT GIVES UP TOO FAST: The default retry config only attempts 3
 #     times with a 30s max delay. During high-demand periods this means Gemini
@@ -27,6 +28,10 @@ set -euo pipefail
 #   ./fix-gemini-cli-ebadf-crash.sh --verify  # verify the EBADF bug exists
 #   ./fix-gemini-cli-ebadf-crash.sh --revert  # undo all patches
 #   ./fix-gemini-cli-ebadf-crash.sh --uninstall  # same as --revert
+#
+# IMPORTANT: Requires a real node binary (/usr/bin/node). Bun's `node` wrapper
+# has a broken process.argv (eats first arg) and exits 0 on uncaught exceptions,
+# which silently breaks the marker detection and file patching.
 #
 # Idempotent: safe to run multiple times. Re-run after `npm/bun update`.
 # Cross-platform: macOS, Linux, WSL. Uses node for string replacement.
@@ -146,12 +151,42 @@ banner
 
 step "Checking prerequisites"
 
-if command -v node &>/dev/null; then
-    NODE_VER="$(node --version 2>/dev/null || echo 'unknown')"
-    ok "node $NODE_VER"
-else
-    fail "node is required but not found in PATH"
+# Find a REAL node binary. Bun ships a "node" wrapper that:
+#   1. Eats the first positional arg from process.argv
+#   2. Exits 0 on uncaught exceptions when stderr is redirected
+# Both bugs silently break node_contains() and node_replace().
+# Prefer /usr/bin/node or any node that isn't bun's wrapper.
+NODE_BIN=""
+for candidate in /usr/bin/node /usr/local/bin/node; do
+    if [[ -x "$candidate" ]]; then
+        NODE_BIN="$candidate"
+        break
+    fi
+done
+if [[ -z "$NODE_BIN" ]]; then
+    # Fall back to PATH, but verify it's not bun's broken wrapper
+    if command -v node &>/dev/null; then
+        NODE_BIN="$(command -v node)"
+        # Detect bun's wrapper by checking if it eats argv
+        ARGV_TEST="$("$NODE_BIN" -e "console.log(process.argv.length)" dummy 2>/dev/null || echo 0)"
+        if [[ "$ARGV_TEST" -lt 2 ]]; then
+            warn "Detected bun's node wrapper (broken process.argv). Looking for real node..."
+            # Try nvm, fnm, etc.
+            for d in "$HOME/.nvm/versions/node"/*/bin/node "$HOME/.local/share/fnm/node-versions"/*/installation/bin/node; do
+                if [[ -x "$d" ]]; then
+                    NODE_BIN="$d"
+                    break
+                fi
+            done
+        fi
+    fi
 fi
+
+if [[ -z "$NODE_BIN" || ! -x "$NODE_BIN" ]]; then
+    fail "node is required but not found (bun's node wrapper is not compatible)"
+fi
+NODE_VER="$("$NODE_BIN" --version 2>/dev/null || echo 'unknown')"
+ok "node $NODE_VER ($NODE_BIN)"
 
 # ── Locate the Gemini CLI installation ──────────────────────────────────────
 
@@ -197,7 +232,7 @@ find_gemini_root() {
     # NVM / fnm
     if command -v node &>/dev/null; then
         local node_prefix
-        node_prefix="$(node -e 'console.log(process.execPath.replace(/\/bin\/node$/, ""))' 2>/dev/null || true)"
+        node_prefix="$("$NODE_BIN" -e 'console.log(process.execPath.replace(/\/bin\/node$/, ""))' 2>/dev/null || true)"
         if [[ -n "$node_prefix" ]]; then
             candidates+=("$node_prefix/lib/node_modules/@google/gemini-cli")
         fi
@@ -221,7 +256,7 @@ ok "Found: $GEMINI_ROOT"
 # Get version
 GEMINI_VER="unknown"
 if [[ -f "$GEMINI_ROOT/package.json" ]]; then
-    GEMINI_VER="$(node -e "console.log(require('$GEMINI_ROOT/package.json').version)" 2>/dev/null || echo 'unknown')"
+    GEMINI_VER="$("$NODE_BIN" -e "console.log(require('$GEMINI_ROOT/package.json').version)" 2>/dev/null || echo 'unknown')"
 fi
 detail "Version: $GEMINI_VER"
 
@@ -239,6 +274,17 @@ SHELL_SVC="$(resolve_path "$CORE_BASE/dist/src/services/shellExecutionService.js
 APP_CONTAINER="$(resolve_path "$GEMINI_ROOT/dist/src/ui/AppContainer.js")"
 RETRY_JS="$(resolve_path "$CORE_BASE/dist/src/utils/retry.js")"
 
+# Find unixTerminal.js in @lydell/node-pty (the native PTY addon)
+UNIX_TERMINAL=""
+for candidate in \
+    "$(dirname "$GEMINI_ROOT")/@lydell/node-pty/unixTerminal.js" \
+    "$(dirname "$GEMINI_ROOT")/../@lydell/node-pty/unixTerminal.js"; do
+    if [[ -f "$candidate" ]]; then
+        UNIX_TERMINAL="$(resolve_path "$candidate")"
+        break
+    fi
+done
+
 check_file() {
     local file="$1" label="$2"
     if [[ -f "$file" ]]; then
@@ -249,14 +295,19 @@ check_file() {
     fi
 }
 
-check_file "$SHELL_SVC"    "shellExecutionService.js"
-check_file "$APP_CONTAINER" "AppContainer.js"
-check_file "$RETRY_JS"      "retry.js"
+check_file "$SHELL_SVC"      "shellExecutionService.js"
+check_file "$APP_CONTAINER"   "AppContainer.js"
+check_file "$RETRY_JS"        "retry.js"
+if [[ -n "$UNIX_TERMINAL" ]]; then
+    check_file "$UNIX_TERMINAL"   "unixTerminal.js"
+else
+    warn "unixTerminal.js — not found (searched @lydell/node-pty)"
+fi
 
 # ── Utility: check if a file contains a string ────────────────────────────
 
 node_contains() {
-    node -e "
+    "$NODE_BIN" -e "
         const fs = require('fs');
         process.exit(fs.readFileSync(process.argv[1],'utf8').includes(process.argv[2]) ? 0 : 1);
     " "$1" "$2" 2>/dev/null
@@ -268,7 +319,7 @@ if [[ "$MODE" == "verify" ]]; then
     step "Verifying the EBADF bug in your native pty addon"
 
     PTY_NODE=""
-    PLATFORM="$(node -e "console.log(process.platform + '-' + process.arch)")"
+    PLATFORM="$("$NODE_BIN" -e "console.log(process.platform + '-' + process.arch)")"
     for candidate in \
         "$(dirname "$GEMINI_ROOT")/../@lydell/node-pty-${PLATFORM}/pty.node" \
         "$(dirname "$GEMINI_ROOT")/../@lydell/node-pty/prebuilds/${PLATFORM}/pty.node"; do
@@ -284,7 +335,7 @@ if [[ "$MODE" == "verify" ]]; then
         ok "Found native addon: $PTY_NODE"
         detail "Calling pty.resize(-1, 80, 24) to trigger EBADF..."
 
-        RESULT="$(node -e "
+        RESULT="$("$NODE_BIN" -e "
             const pty = require('$PTY_NODE');
             try {
                 pty.resize(-1, 80, 24);
@@ -312,17 +363,17 @@ if [[ "$MODE" == "verify" ]]; then
 
     step "Checking retry configuration"
     if [[ -f "$RETRY_JS" ]]; then
-        MAX_ATTEMPTS="$(node -e "
+        MAX_ATTEMPTS="$("$NODE_BIN" -e "
             const c = require('fs').readFileSync('$RETRY_JS','utf8');
             const m = c.match(/DEFAULT_MAX_ATTEMPTS\s*=\s*(\d+)/);
             console.log(m ? m[1] : 'unknown');
         " 2>/dev/null || echo 'unknown')"
-        MAX_DELAY="$(node -e "
+        MAX_DELAY="$("$NODE_BIN" -e "
             const c = require('fs').readFileSync('$RETRY_JS','utf8');
             const m = c.match(/maxDelayMs:\s*(\d+)/);
             console.log(m ? m[1] : 'unknown');
         " 2>/dev/null || echo 'unknown')"
-        INIT_DELAY="$(node -e "
+        INIT_DELAY="$("$NODE_BIN" -e "
             const c = require('fs').readFileSync('$RETRY_JS','utf8');
             const m = c.match(/initialDelayMs:\s*(\d+)/);
             console.log(m ? m[1] : 'unknown');
@@ -366,7 +417,7 @@ inc_failed()  { failed=$((failed + 1));  }
 inc_total()   { total=$((total + 1)); }
 
 node_replace() {
-    node -e "
+    "$NODE_BIN" -e "
         const fs = require('fs');
         const [,file,old_str,new_str] = process.argv;
         let content = fs.readFileSync(file, 'utf8');
@@ -542,35 +593,71 @@ P4_NEW="            // PATCHED: treat TerminalQuotaError as retryable — don't 
                 continue;
             }"
 
+# --- Patch 5: unixTerminal.js — catch EBADF at the pty.resize() source ---
+# Belt-and-suspenders: even if the higher-level catches miss it, this prevents
+# the native ioctl error from escaping node-pty entirely.
+P5_MARKER="// PATCHED: catch EBADF from native pty.resize"
+P5_OLD="    UnixTerminal.prototype.resize = function (cols, rows) {
+        if (cols <= 0 || rows <= 0 || isNaN(cols) || isNaN(rows) || cols === Infinity || rows === Infinity) {
+            throw new Error('resizing must be done using positive cols and rows');
+        }
+        pty.resize(this._fd, cols, rows);
+        this._cols = cols;
+        this._rows = rows;
+    };"
+P5_NEW="    UnixTerminal.prototype.resize = function (cols, rows) {
+        // PATCHED: catch EBADF from native pty.resize
+        if (cols <= 0 || rows <= 0 || isNaN(cols) || isNaN(rows) || cols === Infinity || rows === Infinity) {
+            throw new Error('resizing must be done using positive cols and rows');
+        }
+        try {
+            pty.resize(this._fd, cols, rows);
+        } catch (e) {
+            // The native addon throws \"ioctl(2) failed, EBADF\" when the fd
+            // is already closed (race between exit and resize). Safe to ignore.
+            if (e && (e.message?.includes('EBADF') || e.message?.includes('ESRCH') || e.code === 'EBADF' || e.code === 'ESRCH')) {
+                return;
+            }
+            throw e;
+        }
+        this._cols = cols;
+        this._rows = rows;
+    };"
+
 # ── Apply patches ───────────────────────────────────────────────────────────
 
 case "$MODE" in
-    patch)  step "Applying patches (4 total)" ;;
+    patch)  step "Applying patches (5 total)" ;;
     check)  step "Checking patch status" ;;
     revert) step "Reverting patches" ;;
 esac
 
 printf "\n"
-info "Patch 1/4: EBADF catch in shellExecutionService.js"
+info "Patch 1/5: EBADF catch in shellExecutionService.js"
 detail "resizePty() — add EBADF to the list of safe-to-ignore errors"
 patch_file "$SHELL_SVC" "$P1_MARKER" "$P1_OLD" "$P1_NEW" "shellExecutionService.js EBADF"
 
 printf "\n"
-info "Patch 2/4: EBADF catch in AppContainer.js"
+info "Patch 2/5: EBADF catch in AppContainer.js"
 detail "React useEffect resize wrapper — add EBADF + ESRCH checks"
 patch_file "$APP_CONTAINER" "$P2_MARKER" "$P2_OLD" "$P2_NEW" "AppContainer.js EBADF"
 
 printf "\n"
-info "Patch 3/4: Retry config in retry.js"
+info "Patch 3/5: Retry config in retry.js"
 detail "maxAttempts 3→1000, initialDelay 5s→1s, maxDelay 30s→5s"
 detail "Keeps hammering the API with fast retries until it lets you through"
 patch_file "$RETRY_JS" "$P3_MARKER" "$P3_OLD" "$P3_NEW" "retry.js rate-limit retry"
 
 printf "\n"
-info "Patch 4/4: Never bail on TerminalQuotaError in retry.js"
+info "Patch 4/5: Never bail on TerminalQuotaError in retry.js"
 detail "TerminalQuotaError (daily/overload) normally causes immediate give-up"
 detail "Patched to retry with backoff instead of surrendering"
 patch_file "$RETRY_JS" "$P4_MARKER" "$P4_OLD" "$P4_NEW" "retry.js no-terminal-bail"
+
+printf "\n"
+info "Patch 5/5: EBADF catch at source in unixTerminal.js"
+detail "Belt-and-suspenders: wrap native pty.resize() in try/catch for EBADF/ESRCH"
+patch_file "$UNIX_TERMINAL" "$P5_MARKER" "$P5_OLD" "$P5_NEW" "unixTerminal.js EBADF"
 
 # ── Summary ─────────────────────────────────────────────────────────────────
 

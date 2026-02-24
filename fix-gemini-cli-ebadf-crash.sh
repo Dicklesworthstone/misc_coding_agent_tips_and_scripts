@@ -6,7 +6,7 @@ set -euo pipefail
 # │  https://github.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts│
 # └─────────────────────────────────────────────────────────────────────────┘
 #
-# Fixes two bugs in @google/gemini-cli:
+# Fixes several issues in @google/gemini-cli:
 #
 #  1. EBADF CRASH: @lydell/node-pty's native C++ addon throws
 #     Error("ioctl(2) failed, EBADF") when resizing a PTY whose fd is already
@@ -21,6 +21,19 @@ set -euo pipefail
 #     gives up after ~45 seconds showing "Sorry there's high demand".
 #     FIX: Bump maxAttempts 3 → 1000, maxDelayMs 30s → 5s, initialDelayMs 5s → 1s.
 #     This hammers the API with short delays until it lets you through.
+#
+#  3. DEAD HOOKS CAUSE BEFOORETOOL ERRORS: Hooks in ~/.gemini/settings.json
+#     that reference nonexistent binaries fire BeforeTool errors on every tool
+#     call. Hooks designed for Claude Code (JSON protocol) are incompatible with
+#     Gemini's BeforeTool format and should be removed.
+#     FIX: Parse settings.json, remove hooks with dead command binaries.
+#
+#  4. BUN NODE WRAPPER BREAKS PTY: If ~/.bun/bin appears before /usr/bin in
+#     the gmi wrapper's PATH, #!/usr/bin/env node resolves to bun's node compat
+#     shim (~/.bun/bin/node → bun). Bun's node wrapper has broken process.argv
+#     and exits 0 on uncaught exceptions, causing node-pty native addon failures
+#     that manifest as SIGHUP (signal 1) on every shell command.
+#     FIX: Reorder PATH in gmi wrapper so /usr/bin comes before .bun/bin.
 #
 # Usage:
 #   ./fix-gemini-cli-ebadf-crash.sh           # auto-detect and patch
@@ -109,6 +122,12 @@ banner() {
     box_line \
         "     ▸ Quota errors retry instead of giving up" \
         "     ${GREEN}▸${RESET} Quota errors retry instead of giving up"
+    box_line \
+        "     ▸ Remove dead hooks from settings.json" \
+        "     ${MAGENTA}▸${RESET} Remove dead hooks from settings.json"
+    box_line \
+        "     ▸ Fix bun-node PATH order in gmi wrapper" \
+        "     ${CYAN}▸${RESET} Fix bun-node PATH order in gmi wrapper"
     box_empty
     box_bottom
     printf "\n"
@@ -627,37 +646,231 @@ P5_NEW="    UnixTerminal.prototype.resize = function (cols, rows) {
 # ── Apply patches ───────────────────────────────────────────────────────────
 
 case "$MODE" in
-    patch)  step "Applying patches (5 total)" ;;
+    patch)  step "Applying patches (5 node_modules + 2 environment)" ;;
     check)  step "Checking patch status" ;;
     revert) step "Reverting patches" ;;
 esac
 
 printf "\n"
-info "Patch 1/5: EBADF catch in shellExecutionService.js"
+info "Patch 1/7: EBADF catch in shellExecutionService.js"
 detail "resizePty() — add EBADF to the list of safe-to-ignore errors"
 patch_file "$SHELL_SVC" "$P1_MARKER" "$P1_OLD" "$P1_NEW" "shellExecutionService.js EBADF"
 
 printf "\n"
-info "Patch 2/5: EBADF catch in AppContainer.js"
+info "Patch 2/7: EBADF catch in AppContainer.js"
 detail "React useEffect resize wrapper — add EBADF + ESRCH checks"
 patch_file "$APP_CONTAINER" "$P2_MARKER" "$P2_OLD" "$P2_NEW" "AppContainer.js EBADF"
 
 printf "\n"
-info "Patch 3/5: Retry config in retry.js"
+info "Patch 3/7: Retry config in retry.js"
 detail "maxAttempts 3→1000, initialDelay 5s→1s, maxDelay 30s→5s"
 detail "Keeps hammering the API with fast retries until it lets you through"
 patch_file "$RETRY_JS" "$P3_MARKER" "$P3_OLD" "$P3_NEW" "retry.js rate-limit retry"
 
 printf "\n"
-info "Patch 4/5: Never bail on TerminalQuotaError in retry.js"
+info "Patch 4/7: Never bail on TerminalQuotaError in retry.js"
 detail "TerminalQuotaError (daily/overload) normally causes immediate give-up"
 detail "Patched to retry with backoff instead of surrendering"
 patch_file "$RETRY_JS" "$P4_MARKER" "$P4_OLD" "$P4_NEW" "retry.js no-terminal-bail"
 
 printf "\n"
-info "Patch 5/5: EBADF catch at source in unixTerminal.js"
+info "Patch 5/7: EBADF catch at source in unixTerminal.js"
 detail "Belt-and-suspenders: wrap native pty.resize() in try/catch for EBADF/ESRCH"
 patch_file "$UNIX_TERMINAL" "$P5_MARKER" "$P5_OLD" "$P5_NEW" "unixTerminal.js EBADF"
+
+# --- Patch 6: Sanitize ~/.gemini/settings.json hooks ---
+# Remove hooks whose command binary doesn't exist or that use Claude Code's
+# JSON protocol (incompatible with Gemini's BeforeTool format).
+printf "\n"
+info "Patch 6/7: Sanitize dead hooks in ~/.gemini/settings.json"
+detail "Remove hooks pointing to nonexistent binaries"
+
+GEMINI_SETTINGS="$HOME/.gemini/settings.json"
+inc_total
+
+if [[ ! -f "$GEMINI_SETTINGS" ]]; then
+    ok "~/.gemini/settings.json — not found, skipping"
+    inc_skipped
+elif ! "$NODE_BIN" -e "JSON.parse(require('fs').readFileSync('$GEMINI_SETTINGS','utf8'))" 2>/dev/null; then
+    warn "~/.gemini/settings.json — invalid JSON, skipping"
+    inc_failed
+else
+    case "$MODE" in
+        patch|check)
+            DEAD_HOOKS="$("$NODE_BIN" -e "
+                const fs = require('fs');
+                const path = require('path');
+                const settings = JSON.parse(fs.readFileSync('$GEMINI_SETTINGS', 'utf8'));
+                const hooks = settings.hooks || {};
+                const dead = [];
+                for (const [event, matchers] of Object.entries(hooks)) {
+                    if (!Array.isArray(matchers)) continue;
+                    for (const matcher of matchers) {
+                        const cmds = matcher.hooks || [];
+                        for (const hook of cmds) {
+                            if (hook.command) {
+                                // Extract the binary from the command string
+                                const bin = hook.command.split(/\s+/)[0]
+                                    .replace(/^\\\$HOME/, process.env.HOME || '')
+                                    .replace(/^~/, process.env.HOME || '');
+                                try { fs.accessSync(bin, fs.constants.X_OK); }
+                                catch { dead.push(event + ':' + bin); }
+                            }
+                        }
+                    }
+                }
+                console.log(JSON.stringify(dead));
+            " 2>/dev/null || echo '[]')"
+
+            DEAD_COUNT="$("$NODE_BIN" -e "console.log(JSON.parse(process.argv[1]).length)" "$DEAD_HOOKS" 2>/dev/null || echo 0)"
+
+            if [[ "$DEAD_COUNT" -eq 0 ]]; then
+                # Also check if hooks section exists but is empty
+                HAS_HOOKS="$("$NODE_BIN" -e "
+                    const s = JSON.parse(require('fs').readFileSync('$GEMINI_SETTINGS','utf8'));
+                    console.log(s.hooks && Object.keys(s.hooks).length > 0 ? 'yes' : 'no');
+                " 2>/dev/null || echo 'no')"
+                if [[ "$HAS_HOOKS" == "no" ]]; then
+                    ok "settings.json hooks — clean (no hooks or all valid)"
+                    inc_skipped
+                else
+                    ok "settings.json hooks — all hook binaries exist"
+                    inc_skipped
+                fi
+            elif [[ "$MODE" == "check" ]]; then
+                printf "  ${WRENCH}  ${YELLOW}settings.json — %d dead hook(s) found${RESET}\n" "$DEAD_COUNT"
+                "$NODE_BIN" -e "JSON.parse(process.argv[1]).forEach(h => console.log('     ' + h))" "$DEAD_HOOKS" 2>/dev/null
+                inc_failed
+            else
+                detail "Found $DEAD_COUNT dead hook(s), removing..."
+                "$NODE_BIN" -e "
+                    const fs = require('fs');
+                    const settingsPath = '$GEMINI_SETTINGS';
+                    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+                    const hooks = settings.hooks || {};
+                    let removed = 0;
+
+                    for (const [event, matchers] of Object.entries(hooks)) {
+                        if (!Array.isArray(matchers)) continue;
+                        for (let i = matchers.length - 1; i >= 0; i--) {
+                            const cmds = matchers[i].hooks || [];
+                            for (let j = cmds.length - 1; j >= 0; j--) {
+                                if (cmds[j].command) {
+                                    const bin = cmds[j].command.split(/\s+/)[0]
+                                        .replace(/^\\\$HOME/, process.env.HOME || '')
+                                        .replace(/^~/, process.env.HOME || '');
+                                    try { fs.accessSync(bin, fs.constants.X_OK); }
+                                    catch {
+                                        console.log('  Removed: ' + event + ' → ' + cmds[j].command);
+                                        cmds.splice(j, 1);
+                                        removed++;
+                                    }
+                                }
+                            }
+                            if (cmds.length === 0) matchers.splice(i, 1);
+                        }
+                        if (matchers.length === 0) delete hooks[event];
+                    }
+
+                    if (Object.keys(hooks).length === 0) delete settings.hooks;
+                    else settings.hooks = hooks;
+
+                    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+                    console.log('Removed ' + removed + ' dead hook(s)');
+                " 2>/dev/null
+                ok "settings.json hooks — sanitized"
+                inc_patched
+            fi
+            ;;
+        revert)
+            ok "settings.json hooks — revert not supported (manual config)"
+            inc_skipped
+            ;;
+    esac
+fi
+
+# --- Patch 7: Fix gmi wrapper PATH ordering ---
+# If ~/.bun/bin appears before /usr/bin in PATH, #!/usr/bin/env node resolves
+# to bun's node wrapper which breaks node-pty native addons → SIGHUP on all
+# shell commands. Fix: ensure /usr/bin comes first.
+printf "\n"
+info "Patch 7/7: Fix PATH ordering in gmi wrapper"
+detail "Ensure /usr/bin before .bun/bin so real node is used, not bun's shim"
+
+GMI_WRAPPER="$HOME/.local/bin/gmi"
+P7_MARKER="/usr/bin MUST come before .bun/bin"
+inc_total
+
+if [[ ! -f "$GMI_WRAPPER" ]]; then
+    ok "gmi wrapper — not found at $GMI_WRAPPER, skipping"
+    inc_skipped
+else
+    case "$MODE" in
+        check)
+            if grep -q "$P7_MARKER" "$GMI_WRAPPER" 2>/dev/null; then
+                ok "gmi wrapper — PATH already fixed"
+                inc_skipped
+            elif grep -q '\.bun/bin.*/usr/bin' "$GMI_WRAPPER" 2>/dev/null; then
+                printf "  ${WRENCH}  ${YELLOW}gmi wrapper — .bun/bin before /usr/bin in PATH (needs fix)${RESET}\n"
+                inc_failed
+            else
+                ok "gmi wrapper — PATH order looks OK"
+                inc_skipped
+            fi
+            ;;
+        patch)
+            if grep -q "$P7_MARKER" "$GMI_WRAPPER" 2>/dev/null; then
+                ok "gmi wrapper — PATH already fixed, skipping"
+                inc_skipped
+            elif grep -q '\.bun/bin.*/usr/bin' "$GMI_WRAPPER" 2>/dev/null; then
+                detail "Reordering PATH: /usr/bin before .bun/bin..."
+                # Replace any PATH= assignment where .bun/bin precedes /usr/bin
+                "$NODE_BIN" -e "
+                    const fs = require('fs');
+                    let content = fs.readFileSync('$GMI_WRAPPER', 'utf8');
+                    // Match PATH assignments where .bun/bin comes before /usr/bin
+                    const pathRe = /PATH=\"([^\"]*\.bun\/bin[^\"]*\/usr\/bin[^\"]*)\"/;
+                    const m = content.match(pathRe);
+                    if (m) {
+                        const oldPath = m[1];
+                        // Split on :, move /usr/bin and /usr/local/bin to front
+                        const parts = oldPath.split(':');
+                        const usrBin = parts.filter(p => p === '/usr/bin' || p === '/usr/local/bin');
+                        const rest = parts.filter(p => p !== '/usr/bin' && p !== '/usr/local/bin');
+                        const newPath = [...usrBin, ...rest].join(':');
+                        content = content.replace(oldPath, newPath);
+                        // Add comment if not present
+                        if (!content.includes('$P7_MARKER')) {
+                            content = content.replace(
+                                /(\nexec env )/,
+                                '\n# CRITICAL: /usr/bin MUST come before .bun/bin so #!/usr/bin/env node resolves\n# to real node (/usr/bin/node), NOT bun' + \"'\" + 's node wrapper (~/.bun/bin/node → bun).\n# Bun' + \"'\" + 's node compat shim breaks node-pty native addons causing SIGHUP on all\n# shell commands (every PTY child gets signal 1 immediately).\n\$1'
+                            );
+                        }
+                        fs.writeFileSync('$GMI_WRAPPER', content, 'utf8');
+                        console.log('Reordered: ' + newPath);
+                    } else {
+                        console.log('No PATH pattern matched');
+                        process.exit(2);
+                    }
+                " 2>/dev/null
+                if [[ $? -eq 0 ]]; then
+                    ok "gmi wrapper — PATH reordered"
+                    inc_patched
+                else
+                    warn "gmi wrapper — could not auto-fix PATH order"
+                    inc_failed
+                fi
+            else
+                ok "gmi wrapper — PATH order already correct"
+                inc_skipped
+            fi
+            ;;
+        revert)
+            ok "gmi wrapper — revert not supported (manual fix)"
+            inc_skipped
+            ;;
+    esac
+fi
 
 # ── Summary ─────────────────────────────────────────────────────────────────
 
@@ -684,6 +897,12 @@ case "$MODE" in
             fi
             if node_contains "$RETRY_JS" "$P4_MARKER" 2>/dev/null; then
                 printf "     ${RETRY} Quota errors now retry with backoff instead of giving up\n"
+            fi
+            if [[ -f "$GEMINI_SETTINGS" ]] && ! "$NODE_BIN" -e "const s=JSON.parse(require('fs').readFileSync('$GEMINI_SETTINGS','utf8'));process.exit(s.hooks?1:0)" 2>/dev/null; then
+                printf "     ${WRENCH} Dead hooks removed from settings.json\n"
+            fi
+            if [[ -f "$GMI_WRAPPER" ]] && grep -q "$P7_MARKER" "$GMI_WRAPPER" 2>/dev/null; then
+                printf "     ${WRENCH} gmi wrapper PATH: /usr/bin before .bun/bin\n"
             fi
         fi
         ;;

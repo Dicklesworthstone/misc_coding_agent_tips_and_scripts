@@ -16,10 +16,10 @@ set -euo pipefail
 #     FIX: Add err.message?.includes('EBADF') to both catch sites + at the
 #          native pty.resize() source in unixTerminal.js (belt-and-suspenders).
 #
-#  2. RATE LIMIT GIVES UP TOO FAST: The default retry config only attempts 3
+#  2. RATE LIMIT GIVES UP TOO FAST: The default retry config only attempts 10
 #     times with a 30s max delay. During high-demand periods this means Gemini
-#     gives up after ~45 seconds showing "Sorry there's high demand".
-#     FIX: Bump maxAttempts 3 → 1000, maxDelayMs 30s → 5s, initialDelayMs 5s → 1s.
+#     gives up too quickly showing "Sorry there's high demand".
+#     FIX: Bump maxAttempts 10 → 1000, maxDelayMs 30s → 5s, initialDelayMs 5s → 1s.
 #     This hammers the API with short delays until it lets you through.
 #
 #  3. DEAD HOOKS CAUSE BEFOORETOOL ERRORS: Hooks in ~/.gemini/settings.json
@@ -117,8 +117,8 @@ banner() {
         "     ▸ Fix EBADF crash on PTY resize" \
         "     ${RED}▸${RESET} Fix EBADF crash on PTY resize"
     box_line \
-        "     ▸ Rate-limit retries: 3 → 1000, fast backoff" \
-        "     ${YELLOW}▸${RESET} Rate-limit retries: 3 ${YELLOW}→${RESET} 1000, fast backoff"
+        "     ▸ Rate-limit retries: 10 → 1000, fast backoff" \
+        "     ${YELLOW}▸${RESET} Rate-limit retries: 10 ${YELLOW}→${RESET} 1000, fast backoff"
     box_line \
         "     ▸ Quota errors retry instead of giving up" \
         "     ${GREEN}▸${RESET} Quota errors retry instead of giving up"
@@ -151,7 +151,7 @@ case "${1:-}" in
         printf "\n"
         printf "  ${BOLD}What it fixes:${RESET}\n"
         printf "    ${BUG}  ${BOLD}EBADF crash${RESET} — ioctl(2) on closed PTY fd crashes the CLI\n"
-        printf "    ${RETRY} ${BOLD}Rate limiting${RESET} — gives up after 3 attempts (~45s); patched to 1000 with fast retry\n"
+        printf "    ${RETRY} ${BOLD}Rate limiting${RESET} — gives up after 10 attempts; patched to 1000 with fast retry\n"
         printf "\n"
         printf "  ${BOLD}Notes:${RESET}\n"
         printf "    ${DIM}Idempotent — safe to run multiple times${RESET}\n"
@@ -402,8 +402,8 @@ if [[ "$MODE" == "verify" ]]; then
         detail "initialDelayMs = $INIT_DELAY (should be 1000)"
         detail "maxDelayMs = $MAX_DELAY (should be 5000)"
 
-        if [[ "$MAX_ATTEMPTS" == "3" ]]; then
-            printf "\n     ${YELLOW}Only 3 retry attempts — gives up after ~45 seconds.${RESET}\n"
+        if [[ "$MAX_ATTEMPTS" == "10" ]]; then
+            printf "\n     ${YELLOW}Only 10 retry attempts — gives up too quickly.${RESET}\n"
             printf "     ${YELLOW}Run this script to bump to 1000 attempts with fast retry.${RESET}\n"
         elif [[ "$MAX_ATTEMPTS" == "1000" ]]; then
             ok "Already patched to 1000 attempts"
@@ -546,7 +546,7 @@ P2_NEW="if (!(e instanceof Error &&
 
 # --- Patch 3: retry.js — hammer the API until it lets you through ---
 P3_MARKER="DEFAULT_MAX_ATTEMPTS = 1000"
-P3_OLD="export const DEFAULT_MAX_ATTEMPTS = 3;
+P3_OLD="export const DEFAULT_MAX_ATTEMPTS = 10;
 const DEFAULT_RETRY_OPTIONS = {
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
     initialDelayMs: 5000,
@@ -663,7 +663,7 @@ patch_file "$APP_CONTAINER" "$P2_MARKER" "$P2_OLD" "$P2_NEW" "AppContainer.js EB
 
 printf "\n"
 info "Patch 3/7: Retry config in retry.js"
-detail "maxAttempts 3→1000, initialDelay 5s→1s, maxDelay 30s→5s"
+detail "maxAttempts 10→1000, initialDelay 5s→1s, maxDelay 30s→5s"
 detail "Keeps hammering the API with fast retries until it lets you through"
 patch_file "$RETRY_JS" "$P3_MARKER" "$P3_OLD" "$P3_NEW" "retry.js rate-limit retry"
 
@@ -893,7 +893,7 @@ case "$MODE" in
                 printf "     ${BUG} EBADF resize crash → fixed\n"
             fi
             if node_contains "$RETRY_JS" "$P3_MARKER" 2>/dev/null; then
-                printf "     ${RETRY} Rate-limit retry: 1000 attempts, 1-5s delay (was 3/~45s)\n"
+                printf "     ${RETRY} Rate-limit retry: 1000 attempts, 1-5s delay (was 10/30s)\n"
             fi
             if node_contains "$RETRY_JS" "$P4_MARKER" 2>/dev/null; then
                 printf "     ${RETRY} Quota errors now retry with backoff instead of giving up\n"

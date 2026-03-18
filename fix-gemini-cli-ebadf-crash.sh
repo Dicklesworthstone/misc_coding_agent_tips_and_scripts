@@ -831,7 +831,7 @@ else
             elif grep -q '\.bun/bin.*/usr/bin' "$GMI_WRAPPER" 2>/dev/null; then
                 detail "Reordering PATH: /usr/bin before .bun/bin..."
                 # Replace any PATH= assignment where .bun/bin precedes /usr/bin
-                "$NODE_BIN" -e "
+                if "$NODE_BIN" -e "
                     const fs = require('fs');
                     let content = fs.readFileSync('$GMI_WRAPPER', 'utf8');
                     // Match PATH assignments where .bun/bin comes before /usr/bin
@@ -858,8 +858,7 @@ else
                         console.log('No PATH pattern matched');
                         process.exit(2);
                     }
-                " 2>/dev/null
-                if [[ $? -eq 0 ]]; then
+                " 2>/dev/null; then
                     ok "gmi wrapper — PATH reordered"
                     inc_patched
                 else

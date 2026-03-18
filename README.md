@@ -882,9 +882,9 @@ vault operator raft list-peers
 
 > **Problem:** You want to accept sensitive security reports (vulnerabilities, credentials, PII) through public GitHub issues without exposing the content to anyone except you and your coding agents.
 
-The solution uses [age](https://github.com/FiloSottile/age), a modern X25519 elliptic-curve encryption tool. Reporters encrypt to your **public key** — only your private key can decrypt. No shared secrets, no out-of-band key exchange, no GPG complexity.
+The solution uses [age](https://github.com/FiloSottile/age), a modern X25519 elliptic-curve encryption tool. Reporters encrypt to your **public key**; only your private key can decrypt. No shared secrets, no out-of-band key exchange, no GPG complexity.
 
-**Coding agents:** Run `gh-issue-decrypt` with no arguments for a complete interactive guide — it explains the full encrypt/submit/scan/decrypt workflow and detects your local keys automatically.
+**Coding agents:** Run `gh-issue-decrypt` with no arguments for an interactive guide that walks through the encrypt/submit/scan/decrypt workflow and detects your local keys automatically.
 
 ```
 Reporter                                 Your Coding Agent
@@ -894,7 +894,7 @@ Reporter                                 Your Coding Agent
 3. Pastes ciphertext in GitHub issue     6. Decrypts with age -d -i key
 ```
 
-**One-liner install (for your machine — sets up age, gh CLI, and generates your keypair):**
+**One-liner install (sets up age, gh CLI, and generates your keypair):**
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/gh-issue-decrypt?$(date +%s)" | bash -s -- --install
@@ -908,7 +908,7 @@ echo "SSRF vulnerability in /api/proxy — allows internal network scanning via 
   | gh-issue-decrypt --encrypt age1YOUR_PUBKEY_HERE --submit OWNER/REPO --title "Security: SSRF in proxy endpoint"
 ```
 
-Or manually — encrypt and paste:
+Or manually, encrypt and paste:
 
 ```bash
 echo "your secret report" | age -a -r age1PUBKEY_HERE
@@ -981,7 +981,7 @@ EOF
 <details>
 <summary><strong>Agent quickstart (run with no args)</strong></summary>
 
-Running `gh-issue-decrypt` with no arguments prints a comprehensive guide for coding agents explaining the full workflow — how to encrypt, submit, scan, and decrypt. This is designed for agents like Claude Code, Codex, or Gemini CLI that need to understand the system from scratch:
+Running `gh-issue-decrypt` with no arguments prints a guide covering the full workflow (encrypt, submit, scan, decrypt). Designed for agents like Claude Code, Codex, or Gemini CLI that need to understand the system from scratch:
 
 ```bash
 gh-issue-decrypt
@@ -1000,22 +1000,22 @@ gh-issue-decrypt
 
 age encrypts but does **not** authenticate the sender. Anyone with your public key can encrypt to you. If you need to verify who sent a message, have senders also sign their plaintext with:
 
-- **SSH signatures** (`ssh-keygen -Y sign`) — easiest if they already have SSH keys
-- **minisign** (`minisign -S`) — lightweight Ed25519 signing tool
+- **SSH signatures** (`ssh-keygen -Y sign`): easiest if they already have SSH keys
+- **minisign** (`minisign -S`): lightweight Ed25519 signing tool
 
 </details>
 
 <details>
 <summary><strong>Why age over GPG/minisign/libsodium</strong></summary>
 
-- **GPG/OpenPGP** — Works but operationally fragile. Key management is a UX disaster. Even SOPS recommends age over PGP where possible.
-- **minisign** — Signing only, not encryption. Good complement to age for sender authentication.
-- **libsodium/NaCl box** — Good primitives but requires designing a custom message format, detection convention, and CLI tooling from scratch.
-- **age** — Modern, simple CLI, tiny keys, Unix-composable, ASCII-armored output safe for Markdown, and the recipient-key model means no shared secrets.
+- **GPG/OpenPGP**: Works but operationally fragile. Key management is a UX disaster. Even SOPS recommends age over PGP where possible.
+- **minisign**: Signing only, not encryption. Good complement to age for sender authentication.
+- **libsodium/NaCl box**: Good primitives but you end up designing a custom message format, detection convention, and CLI tooling yourself.
+- **age**: Simple CLI, tiny keys, Unix-composable, ASCII-armored output safe for Markdown, and the recipient-key model means no shared secrets.
 
 </details>
 
-**[Script source →](gh-issue-decrypt)** | **[Full Claude Code session transcript →](https://dicklesworthstone.github.io/misc_coding_agent_tips_and_scripts/cc_session_making_encrypted_gh_issues_system.html)** *(the entire AI coding session that built this system — 577 messages, from initial concept through fleet testing)*
+**[Script source →](gh-issue-decrypt)** | **[Full Claude Code session transcript →](https://dicklesworthstone.github.io/misc_coding_agent_tips_and_scripts/cc_session_making_encrypted_gh_issues_system.html)** *(the entire AI coding session that built this system, 577 messages, from initial concept through fleet testing)*
 
 ---
 

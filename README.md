@@ -1015,7 +1015,7 @@ age encrypts but does **not** authenticate the sender. Anyone with your public k
 
 </details>
 
-**[Script source →](gh-issue-decrypt)** | **[Full Claude Code session transcript →](https://dicklesworthstone.github.io/misc_coding_agent_tips_and_scripts/cc_session_making_encrypted_gh_issues_system.html)** *(the entire AI coding session that built this system, 577 messages, from initial concept through fleet testing)*
+**[Script source →](gh-issue-decrypt)** | **[Full Claude Code session transcript →](https://dicklesworthstone.github.io/misc_coding_agent_tips_and_scripts/cc_session_making_encrypted_gh_issues_system.html)** *(the full Claude Code session that built this system: 19 human prompts, ~400 tool calls, from initial concept through fleet testing)*
 
 ---
 

@@ -13,8 +13,11 @@ set -euo pipefail
 #     closed. The existing catch blocks only check err.code === 'ESRCH', but the
 #     native addon puts "EBADF" only in .message (no .code property). The error
 #     falls through and crashes the entire CLI.
-#     FIX: Add err.message?.includes('EBADF') to both catch sites + at the
-#          native pty.resize() source in unixTerminal.js (belt-and-suspenders).
+#     FIX: Add err.message?.includes('EBADF') to catch sites in
+#          shellExecutionService.js, ShellToolMessage.js, and at the native
+#          pty.resize() source in unixTerminal.js (belt-and-suspenders).
+#     NOTE: In v0.34.0, the resize useEffect moved from AppContainer.js to
+#           ShellToolMessage.js. The patch tracks the new location.
 #
 #  2. RATE LIMIT GIVES UP TOO FAST: The default retry config only attempts 10
 #     times with a 30s max delay. During high-demand periods this means Gemini
@@ -22,7 +25,7 @@ set -euo pipefail
 #     FIX: Bump maxAttempts 10 → 1000, maxDelayMs 30s → 5s, initialDelayMs 5s → 1s.
 #     This hammers the API with short delays until it lets you through.
 #
-#  3. DEAD HOOKS CAUSE BEFOORETOOL ERRORS: Hooks in ~/.gemini/settings.json
+#  3. DEAD HOOKS CAUSE BEFORETOOL ERRORS: Hooks in ~/.gemini/settings.json
 #     that reference nonexistent binaries fire BeforeTool errors on every tool
 #     call. Hooks designed for Claude Code (JSON protocol) are incompatible with
 #     Gemini's BeforeTool format and should be removed.
@@ -290,7 +293,7 @@ resolve_path() {
 }
 
 SHELL_SVC="$(resolve_path "$CORE_BASE/dist/src/services/shellExecutionService.js")"
-APP_CONTAINER="$(resolve_path "$GEMINI_ROOT/dist/src/ui/AppContainer.js")"
+SHELL_TOOL_MSG="$(resolve_path "$GEMINI_ROOT/dist/src/ui/components/messages/ShellToolMessage.js")"
 RETRY_JS="$(resolve_path "$CORE_BASE/dist/src/utils/retry.js")"
 
 # Find unixTerminal.js in @lydell/node-pty (the native PTY addon)
@@ -315,7 +318,7 @@ check_file() {
 }
 
 check_file "$SHELL_SVC"      "shellExecutionService.js"
-check_file "$APP_CONTAINER"   "AppContainer.js"
+check_file "$SHELL_TOOL_MSG"  "ShellToolMessage.js"
 check_file "$RETRY_JS"        "retry.js"
 if [[ -n "$UNIX_TERMINAL" ]]; then
     check_file "$UNIX_TERMINAL"   "unixTerminal.js"
@@ -530,7 +533,10 @@ P1_NEW="const isEsrch = err.code === 'ESRCH';
                     // On Windows, we get a message-based error.
                     // In all cases, it's safe to ignore."
 
-# --- Patch 2: AppContainer.js EBADF ---
+# --- Patch 2: ShellToolMessage.js EBADF ---
+# In v0.34.0, the resize useEffect moved from AppContainer.js to ShellToolMessage.js.
+# The catch block still only handles 'Cannot resize a pty that has already exited'
+# and misses EBADF (native addon sets no .code property, only .message).
 P2_MARKER="e.message.includes('EBADF')"
 P2_OLD="if (!(e instanceof Error &&
                     e.message.includes('Cannot resize a pty that has already exited'))) {
@@ -657,9 +663,9 @@ detail "resizePty() — add EBADF to the list of safe-to-ignore errors"
 patch_file "$SHELL_SVC" "$P1_MARKER" "$P1_OLD" "$P1_NEW" "shellExecutionService.js EBADF"
 
 printf "\n"
-info "Patch 2/7: EBADF catch in AppContainer.js"
-detail "React useEffect resize wrapper — add EBADF + ESRCH checks"
-patch_file "$APP_CONTAINER" "$P2_MARKER" "$P2_OLD" "$P2_NEW" "AppContainer.js EBADF"
+info "Patch 2/7: EBADF catch in ShellToolMessage.js"
+detail "Shell tool resize useEffect — add EBADF + ESRCH checks"
+patch_file "$SHELL_TOOL_MSG" "$P2_MARKER" "$P2_OLD" "$P2_NEW" "ShellToolMessage.js EBADF"
 
 printf "\n"
 info "Patch 3/7: Retry config in retry.js"

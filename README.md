@@ -649,9 +649,9 @@ bd config set sync.branch beads-sync
 
 Google's Gemini CLI (`@google/gemini-cli`) has two bugs that make it nearly unusable in practice:
 
-1. **EBADF crash on every launch** (wide terminals): The CLI uses `node-pty` for shell execution. A React `useEffect` fires `resizePty()` after the PTY's file descriptor is already closed. The native C++ addon throws `Error("ioctl(2) failed, EBADF")`, but the catch blocks only check `err.code === 'ESRCH'` — the native addon sets **no `.code` property** (only `.message`), so the error falls through and crashes the entire CLI.
+1. **EBADF crash on every launch** (wide terminals): The CLI uses `node-pty` for shell execution. A `useEffect` in the shell tool component fires `resizePty()` after the PTY's file descriptor is already closed. The native C++ addon throws `Error("ioctl(2) failed, EBADF")`, but the catch blocks only check `err.code === 'ESRCH'` — the native addon sets **no `.code` property** (only `.message`), so the error falls through and crashes the entire CLI.
 
-2. **"Sorry there's high demand" gives up after 3 tries**: The default retry config (`DEFAULT_MAX_ATTEMPTS = 3`, `maxDelayMs = 30000`) means Gemini gives up after ~45 seconds. Worse, `TerminalQuotaError` (which fires for daily limits **and** temporary overload) bypasses retry entirely and immediately surrenders.
+2. **"Sorry there's high demand" gives up after 10 tries**: The default retry config (`DEFAULT_MAX_ATTEMPTS = 10`, `maxDelayMs = 30000`) means Gemini gives up quickly during high-demand periods. Worse, `TerminalQuotaError` (which fires for daily limits **and** temporary overload) bypasses retry entirely and immediately surrenders.
 
 **One-liner fix:**
 
@@ -664,8 +664,8 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent
 | Patch | File | Change |
 |:------|:-----|:-------|
 | EBADF catch #1 | `shellExecutionService.js` | Add `err.message?.includes('EBADF')` to `resizePty()` catch |
-| EBADF catch #2 | `AppContainer.js` | Add `EBADF` + `ESRCH` checks to React useEffect catch |
-| Aggressive retry | `retry.js` | `maxAttempts` 3 → 1000, `initialDelay` 5s → 1s, `maxDelay` 30s → 5s |
+| EBADF catch #2 | `ShellToolMessage.js` | Add `EBADF` + `ESRCH` checks to shell tool resize useEffect |
+| Aggressive retry | `retry.js` | `maxAttempts` 10 → 1000, `initialDelay` 5s → 1s, `maxDelay` 30s → 5s |
 | Never bail on quota | `retry.js` | `TerminalQuotaError` retries with backoff instead of immediately giving up |
 
 <details>

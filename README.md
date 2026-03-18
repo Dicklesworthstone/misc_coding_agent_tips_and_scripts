@@ -26,6 +26,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | [DevOps CLI Tools](#devops-cli-tools) | Clicking through web dashboards wastes time | 15 min |
 | [Gemini CLI Crash + Retry Fix](#gemini-cli-crash--retry-fix) | Gemini CLI crashes with EBADF and gives up after 3 retries | 10 sec |
 | [Zellij Scroll Wheel Fix](#zellij-scroll-wheel-fix) | Mouse wheel triggers atuin instead of scrollback in Zellij over SSH | 10 min |
+| [Encrypted GitHub Issues](#encrypted-github-issues) | Need to receive sensitive security reports in public repos | 2 min |
 
 ---
 
@@ -875,6 +876,149 @@ vault operator raft list-peers
 
 ---
 
+## Security
+
+### Encrypted GitHub Issues
+
+> **Problem:** You want to accept sensitive security reports (vulnerabilities, credentials, PII) through public GitHub issues without exposing the content to anyone except you and your coding agents.
+
+The solution uses [age](https://github.com/FiloSottile/age), a modern X25519 elliptic-curve encryption tool. Reporters encrypt to your **public key** — only your private key can decrypt. No shared secrets, no out-of-band key exchange, no GPG complexity.
+
+**Coding agents:** Run `gh-issue-decrypt` with no arguments for a complete interactive guide — it explains the full encrypt/submit/scan/decrypt workflow and detects your local keys automatically.
+
+```
+Reporter                                 Your Coding Agent
+────────                                 ─────────────────
+1. Gets your public key from README      4. Scans issues (gh api)
+2. Encrypts with age -a -r PUBKEY        5. Detects armored age blocks
+3. Pastes ciphertext in GitHub issue     6. Decrypts with age -d -i key
+```
+
+**One-liner install (for your machine — sets up age, gh CLI, and generates your keypair):**
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/gh-issue-decrypt?$(date +%s)" | bash -s -- --install
+```
+
+**For reporters submitting an encrypted issue:**
+
+```bash
+# Install age if needed, then encrypt and submit in one command:
+echo "SSRF vulnerability in /api/proxy — allows internal network scanning via user-controlled URL parameter" \
+  | gh-issue-decrypt --encrypt age1YOUR_PUBKEY_HERE --submit OWNER/REPO --title "Security: SSRF in proxy endpoint"
+```
+
+Or manually — encrypt and paste:
+
+```bash
+echo "your secret report" | age -a -r age1PUBKEY_HERE
+# Paste the output into a GitHub issue wrapped in [enc:age]...[/enc:age] markers
+```
+
+| Feature | Details |
+|:--------|:--------|
+| Encryption | X25519 (Curve25519 ECDH), 128-bit security level |
+| Key format | `age1...` public key (62 chars, safe to publish) |
+| Ciphertext | ASCII-armored, Markdown-safe, paste-friendly |
+| Dependencies | `age` + `gh` (auto-installed on Linux/macOS) |
+| Package managers | apt, dnf, pacman, apk, zypper, nix, Homebrew, MacPorts, GitHub binary fallback |
+| Agent integration | `--json` mode for machine-readable output |
+| Sender mode | `--encrypt` encrypts stdin; `--submit` creates the issue directly |
+
+<details>
+<summary><strong>How reporters encrypt (step by step)</strong></summary>
+
+```bash
+# 1. Install age
+brew install age          # macOS
+sudo apt install age      # Ubuntu/Debian
+# Or let the script handle it:
+gh-issue-decrypt --install
+
+# 2. Get the project's public key from their README
+# It looks like: age1k5fz7d7zqsd4k60rn024a3gsd4tumjrkaqna0r20jz4gsu7mmvvql2k3jr
+
+# 3. Encrypt your message (armored for pasting)
+echo "The auth middleware at line 42 skips token expiry validation
+when the iss claim is missing. An attacker can forge expired JWTs
+by omitting the issuer field." \
+  | age -a -r age1k5fz7d7zqsd4k60rn024a3gsd4tumjrkaqna0r20jz4gsu7mmvvql2k3jr
+
+# 4. Paste the output into a GitHub issue:
+#
+#   [enc:age]
+#   -----BEGIN AGE ENCRYPTED FILE-----
+#   YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA...
+#   -----END AGE ENCRYPTED FILE-----
+#   [/enc:age]
+```
+
+</details>
+
+<details>
+<summary><strong>How your agents decrypt</strong></summary>
+
+```bash
+# Scan all open issues in a repo
+gh-issue-decrypt Dicklesworthstone/some_project
+
+# Decrypt a specific issue
+gh-issue-decrypt Dicklesworthstone/some_project 42
+
+# Machine-readable output for automation
+gh-issue-decrypt --json Dicklesworthstone/some_project
+
+# Manual decryption of a single block
+age -d -i ~/.config/age/issuebot.key <<'EOF'
+-----BEGIN AGE ENCRYPTED FILE-----
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA...
+-----END AGE ENCRYPTED FILE-----
+EOF
+```
+
+</details>
+
+<details>
+<summary><strong>Agent quickstart (run with no args)</strong></summary>
+
+Running `gh-issue-decrypt` with no arguments prints a comprehensive guide for coding agents explaining the full workflow — how to encrypt, submit, scan, and decrypt. This is designed for agents like Claude Code, Codex, or Gemini CLI that need to understand the system from scratch:
+
+```bash
+gh-issue-decrypt
+# Prints:
+#   - How public-key encryption works in this context
+#   - Step-by-step sender instructions
+#   - Three submission methods (--submit, gh issue create, manual paste)
+#   - Receiver scanning commands
+#   - All available flags
+```
+
+</details>
+
+<details>
+<summary><strong>Authentication caveat</strong></summary>
+
+age encrypts but does **not** authenticate the sender. Anyone with your public key can encrypt to you. If you need to verify who sent a message, have senders also sign their plaintext with:
+
+- **SSH signatures** (`ssh-keygen -Y sign`) — easiest if they already have SSH keys
+- **minisign** (`minisign -S`) — lightweight Ed25519 signing tool
+
+</details>
+
+<details>
+<summary><strong>Why age over GPG/minisign/libsodium</strong></summary>
+
+- **GPG/OpenPGP** — Works but operationally fragile. Key management is a UX disaster. Even SOPS recommends age over PGP where possible.
+- **minisign** — Signing only, not encryption. Good complement to age for sender authentication.
+- **libsodium/NaCl box** — Good primitives but requires designing a custom message format, detection convention, and CLI tooling from scratch.
+- **age** — Modern, simple CLI, tiny keys, Unix-composable, ASCII-armored output safe for Markdown, and the recipient-key model means no shared secrets.
+
+</details>
+
+**[Script source →](gh-issue-decrypt)**
+
+---
+
 ## Tech Stack
 
 | Category | Tools |
@@ -888,6 +1032,7 @@ vault operator raft list-peers
 | Platforms | Vercel |
 | Package Managers | bun, npm, native installers |
 | Hardware | NVIDIA GPUs, Logitech MX Master |
+| Security | age (X25519 encryption) |
 | OS | macOS, Linux (Ubuntu, Arch) |
 
 ## Related
@@ -901,7 +1046,8 @@ vault operator raft list-peers
 - [WezTerm](https://wezfurlong.org/wezterm/) / [Ghostty](https://ghostty.org)
 - [HashiCorp Vault](https://www.vaultproject.io/) / [Vault Tutorials](https://developer.hashicorp.com/vault/tutorials)
 - [Vercel REST API](https://vercel.com/docs/rest-api)
+- [age encryption](https://github.com/FiloSottile/age) — Simple, modern X25519 encryption
 
 ---
 
-*Last updated: January 2026*
+*Last updated: March 2026*

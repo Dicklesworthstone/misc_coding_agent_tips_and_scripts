@@ -266,7 +266,7 @@ SETTINGS_FILE="$INSTALL_DIR/settings.json"
 
 if [[ -f "$SETTINGS_FILE" ]]; then
     # Check if hooks.PreToolUse already exists
-    if python3 -c "import json; d=json.load(open('$SETTINGS_FILE')); exit(0 if 'hooks' in d and 'PreToolUse' in d['hooks'] else 1)" 2>/dev/null; then
+    if python3 -c "import json; d=json.load(open('$SETTINGS_FILE')); exit(0 if isinstance(d, dict) and 'hooks' in d and 'PreToolUse' in d.get('hooks', {}) else 1)" 2>/dev/null; then
         echo -e "${YELLOW}⚠${NC}  $SETTINGS_FILE already has PreToolUse hooks configured."
         echo -e "    Please manually add this to your existing PreToolUse array:"
         echo ""
@@ -283,10 +283,15 @@ if [[ -f "$SETTINGS_FILE" ]]; then
     else
         # Merge hooks into existing settings
         python3 << MERGE_SCRIPT
-import json
+import json, sys
 
-with open("$SETTINGS_FILE", "r") as f:
-    settings = json.load(f)
+try:
+    with open("$SETTINGS_FILE", "r") as f:
+        settings = json.load(f)
+    if not isinstance(settings, dict):
+        settings = {}
+except (json.JSONDecodeError, ValueError):
+    settings = {}
 
 if "hooks" not in settings:
     settings["hooks"] = {}

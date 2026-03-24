@@ -283,7 +283,7 @@ if [[ -f "$SETTINGS_FILE" ]]; then
     else
         # Merge hooks into existing settings
         python3 << MERGE_SCRIPT
-import json, sys
+import json
 
 try:
     with open("$SETTINGS_FILE", "r") as f:

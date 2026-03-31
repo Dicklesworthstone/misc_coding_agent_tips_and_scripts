@@ -542,7 +542,7 @@ rm ~/.bun/bin/claude 2>/dev/null
 
 ### Claude Code MCP Config Fix
 
-Claude Code stores MCP server configurations in `~/.claude.json`. These can get wiped out by fresh installs, updates, or config corruption. Instead of running the full MCP Agent Mail installer, use this lightweight script that only restores the MCP config.
+Claude Code stores MCP server configurations in `~/.claude/settings.json` on current installs, though older installs may still use `~/.claude.json`. These can get wiped out by fresh installs, updates, or config corruption. Instead of running the full MCP Agent Mail installer, use this lightweight script that only restores the MCP config.
 
 **One command fix:**
 
@@ -555,7 +555,7 @@ fix_cc_mcp
 | Server | Type | Purpose |
 |:-------|:-----|:--------|
 | `mcp-agent-mail` | HTTP | Multi-agent coordination, messaging, file reservations |
-| `morph-mcp` | stdio | AI-powered code search via `warp_grep` |
+| `morph-mcp` | stdio | AI-powered grep-only Morph search via `warpgrep_codebase_search,warpgrep_github_search` |
 
 <details>
 <summary><strong>Quick install</strong></summary>
@@ -574,7 +574,7 @@ Or copy the script from the full guide.
 
 </details>
 
-**Token discovery:** The script automatically finds your bearer token from `MCP_AGENT_MAIL_TOKEN` env var, `~/mcp_agent_mail/.env`, or existing `~/.claude.json`.
+**Token discovery:** The script automatically finds your bearer token from `MCP_AGENT_MAIL_TOKEN`, `~/mcp_agent_mail/.env`, current `~/.claude/settings.json`, or legacy `~/.claude.json`.
 
 **[Full guide →](FIX_CLAUDE_CODE_MCP_CONFIG.md)**
 

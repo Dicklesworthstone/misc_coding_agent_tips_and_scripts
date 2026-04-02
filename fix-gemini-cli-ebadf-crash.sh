@@ -884,7 +884,7 @@ else
                 fi
             elif [[ "$MODE" == "check" ]]; then
                 printf "  ${WRENCH}  ${YELLOW}settings.json — %d dead hook(s) found${RESET}\n" "$DEAD_COUNT"
-                "$NODE_BIN" -e "JSON.parse(process.argv[1]).forEach(h => console.log('     ' + h))" "$DEAD_HOOKS" 2>/dev/null
+                "$NODE_BIN" -e "JSON.parse(process.argv[1]).forEach(h => console.log('     ' + h))" "$DEAD_HOOKS" 2>/dev/null || true
                 inc_failed
             else
                 detail "Found $DEAD_COUNT dead hook(s), removing..."

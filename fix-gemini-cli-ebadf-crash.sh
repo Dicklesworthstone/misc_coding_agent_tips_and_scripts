@@ -830,6 +830,7 @@ info "Patch 6/7: Sanitize dead hooks in ~/.gemini/settings.json"
 detail "Remove hooks pointing to nonexistent binaries"
 
 GEMINI_SETTINGS="$HOME/.gemini/settings.json"
+HOOKS_CLEANED=false
 inc_total
 
 if [[ ! -f "$GEMINI_SETTINGS" ]]; then
@@ -887,7 +888,7 @@ else
                 inc_failed
             else
                 detail "Found $DEAD_COUNT dead hook(s), removing..."
-                "$NODE_BIN" -e "
+                if "$NODE_BIN" -e "
                     const fs = require('fs');
                     const settingsPath = '$GEMINI_SETTINGS';
                     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
@@ -921,9 +922,14 @@ else
 
                     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
                     console.log('Removed ' + removed + ' dead hook(s)');
-                " 2>/dev/null
-                ok "settings.json hooks — sanitized"
-                inc_patched
+                " 2>/dev/null; then
+                    ok "settings.json hooks — sanitized"
+                    HOOKS_CLEANED=true
+                    inc_patched
+                else
+                    warn "settings.json hooks — failed to write changes"
+                    inc_failed
+                fi
             fi
             ;;
         revert)
@@ -1037,7 +1043,7 @@ case "$MODE" in
         fi
         if [[ $((patched + skipped)) -gt 0 ]]; then
             printf "\n"
-            if [[ -n "$SHELL_SVC" ]] && { [[ $patched -gt 0 ]] || node_contains "$SHELL_SVC" "$P1_MARKER" 2>/dev/null; }; then
+            if [[ -n "$SHELL_SVC" ]] && node_contains "$SHELL_SVC" "$P1_MARKER" 2>/dev/null; then
                 printf "     ${BUG} EBADF resize crash → fixed (shellExecutionService.js)\n"
             fi
             if [[ -n "$UNIX_TERMINAL" ]] && node_contains "$UNIX_TERMINAL" "$P5_MARKER" 2>/dev/null; then
@@ -1049,7 +1055,7 @@ case "$MODE" in
             if [[ -n "$RETRY_JS" ]] && node_contains "$RETRY_JS" "$P4_MARKER" 2>/dev/null; then
                 printf "     ${RETRY} Quota errors now retry with backoff instead of giving up\n"
             fi
-            if [[ -f "$GEMINI_SETTINGS" ]] && ! "$NODE_BIN" -e "const s=JSON.parse(require('fs').readFileSync('$GEMINI_SETTINGS','utf8'));process.exit(s.hooks?1:0)" 2>/dev/null; then
+            if $HOOKS_CLEANED; then
                 printf "     ${WRENCH} Dead hooks removed from settings.json\n"
             fi
             if [[ -f "$GMI_WRAPPER" ]] && grep -q "$P7_MARKER" "$GMI_WRAPPER" 2>/dev/null; then

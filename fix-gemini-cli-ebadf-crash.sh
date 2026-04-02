@@ -14,16 +14,25 @@ set -euo pipefail
 #     native addon puts "EBADF" only in .message (no .code property). The error
 #     falls through and crashes the entire CLI.
 #     FIX: Add err.message?.includes('EBADF') to catch sites in
-#          shellExecutionService.js, ShellToolMessage.js, and at the native
-#          pty.resize() source in unixTerminal.js (belt-and-suspenders).
-#     NOTE: In v0.34.0, the resize useEffect moved from AppContainer.js to
-#           ShellToolMessage.js. The patch tracks the new location.
+#          shellExecutionService.js and at the native pty.resize() source in
+#          unixTerminal.js (belt-and-suspenders).
+#     NOTE: In v0.36.0+, gemini-cli ships as a self-contained bundle. The
+#           shellExecutionService.js patch only applies when @google/gemini-cli-core
+#           is installed as a separate package (v0.35.x and earlier). The
+#           unixTerminal.js patch (Patch 5) always works since @lydell/node-pty is
+#           a native addon loaded at runtime.
+#     NOTE: ShellToolMessage.js (patched in earlier script versions) was removed
+#           in v0.36.0's bundle-based architecture. Patch 2 is retained for
+#           backward compatibility with older installations.
 #
 #  2. RATE LIMIT GIVES UP TOO FAST: The default retry config only attempts 10
 #     times with a 30s max delay. During high-demand periods this means Gemini
 #     gives up too quickly showing "Sorry there's high demand".
 #     FIX: Bump maxAttempts 10 → 1000, maxDelayMs 30s → 5s, initialDelayMs 5s → 1s.
 #     This hammers the API with short delays until it lets you through.
+#     NOTE: In v0.36.0+ bundle builds, the retry logic is compiled into the
+#           bundle and cannot be patched externally. These patches only apply
+#           when @google/gemini-cli-core is installed as a separate package.
 #
 #  3. DEAD HOOKS CAUSE BEFORETOOL ERRORS: Hooks in ~/.gemini/settings.json
 #     that reference nonexistent binaries fire BeforeTool errors on every tool
@@ -261,7 +270,8 @@ find_gemini_root() {
     fi
 
     for dir in "${candidates[@]}"; do
-        if [[ -d "$dir/dist" ]]; then
+        # v0.35.x and earlier use dist/, v0.36.0+ use bundle/
+        if [[ -d "$dir/dist" || -d "$dir/bundle" ]]; then
             echo "$dir"
             return 0
         fi
@@ -282,25 +292,74 @@ if [[ -f "$GEMINI_ROOT/package.json" ]]; then
 fi
 detail "Version: $GEMINI_VER"
 
+# Detect bundle-based architecture (v0.36.0+)
+# In v0.36.0, gemini-cli ships as a self-contained bundle with all core logic
+# compiled into chunk files. Individual source files (shellExecutionService.js,
+# retry.js) are no longer available. Only @lydell/node-pty (native addon) is
+# still loaded as a separate module at runtime.
+IS_BUNDLE=false
+if [[ -d "$GEMINI_ROOT/bundle" && ! -d "$GEMINI_ROOT/dist" ]]; then
+    IS_BUNDLE=true
+    detail "Architecture: bundle-based (core logic compiled into chunks)"
+else
+    detail "Architecture: traditional (separate source files)"
+fi
+
 # ── Resolve patch target paths ──────────────────────────────────────────────
 
 step "Locating target files"
-
-CORE_BASE="$(dirname "$GEMINI_ROOT")/gemini-cli-core"
 
 resolve_path() {
     realpath "$1" 2>/dev/null || readlink -f "$1" 2>/dev/null || echo "$1"
 }
 
-SHELL_SVC="$(resolve_path "$CORE_BASE/dist/src/services/shellExecutionService.js")"
-SHELL_TOOL_MSG="$(resolve_path "$GEMINI_ROOT/dist/src/ui/components/messages/ShellToolMessage.js")"
-RETRY_JS="$(resolve_path "$CORE_BASE/dist/src/utils/retry.js")"
+# Search for gemini-cli-core in multiple locations (may be a sibling package
+# or installed separately). In v0.36.0+ it's no longer a runtime dependency
+# but may still be installed from a previous version.
+CORE_BASE=""
+for _core_candidate in \
+    "$(dirname "$GEMINI_ROOT")/gemini-cli-core" \
+    "$HOME/.bun/install/global/node_modules/@google/gemini-cli-core" \
+    "$(npm root -g 2>/dev/null || true)/@google/gemini-cli-core" \
+    "$HOME/.local/share/fnm/node-versions"/*/installation/lib/node_modules/@google/gemini-cli-core; do
+    if [[ -d "$_core_candidate/dist" ]]; then
+        CORE_BASE="$(resolve_path "$_core_candidate")"
+        break
+    fi
+done
+
+if [[ -z "$CORE_BASE" ]]; then
+    if $IS_BUNDLE; then
+        detail "gemini-cli-core not found (expected for bundle-based builds)"
+    else
+        warn "gemini-cli-core not found — patches 1, 3, 4 will be skipped"
+    fi
+fi
+
+# Core-based file paths (only if gemini-cli-core is installed)
+SHELL_SVC=""
+RETRY_JS=""
+if [[ -n "$CORE_BASE" ]]; then
+    SHELL_SVC="$(resolve_path "$CORE_BASE/dist/src/services/shellExecutionService.js")"
+    RETRY_JS="$(resolve_path "$CORE_BASE/dist/src/utils/retry.js")"
+fi
+
+# ShellToolMessage.js — only exists in traditional (non-bundle) installs
+SHELL_TOOL_MSG=""
+if ! $IS_BUNDLE; then
+    SHELL_TOOL_MSG="$(resolve_path "$GEMINI_ROOT/dist/src/ui/components/messages/ShellToolMessage.js")"
+fi
 
 # Find unixTerminal.js in @lydell/node-pty (the native PTY addon)
+# This is the most important patch — it catches EBADF at the source before any
+# higher-level code sees it. Works for both bundle and traditional installs
+# because @lydell/node-pty is always loaded as a separate native module.
 UNIX_TERMINAL=""
 for candidate in \
     "$(dirname "$GEMINI_ROOT")/@lydell/node-pty/unixTerminal.js" \
-    "$(dirname "$GEMINI_ROOT")/../@lydell/node-pty/unixTerminal.js"; do
+    "$(dirname "$GEMINI_ROOT")/../@lydell/node-pty/unixTerminal.js" \
+    "$HOME/.bun/install/global/node_modules/@lydell/node-pty/unixTerminal.js" \
+    "$(npm root -g 2>/dev/null || true)/@lydell/node-pty/unixTerminal.js"; do
     if [[ -f "$candidate" ]]; then
         UNIX_TERMINAL="$(resolve_path "$candidate")"
         break
@@ -309,7 +368,9 @@ done
 
 check_file() {
     local file="$1" label="$2"
-    if [[ -f "$file" ]]; then
+    if [[ -z "$file" ]]; then
+        return  # Empty path — skip silently (handled elsewhere)
+    elif [[ -f "$file" ]]; then
         ok "$label"
         detail "$file"
     else
@@ -317,9 +378,22 @@ check_file() {
     fi
 }
 
-check_file "$SHELL_SVC"      "shellExecutionService.js"
-check_file "$SHELL_TOOL_MSG"  "ShellToolMessage.js"
-check_file "$RETRY_JS"        "retry.js"
+if [[ -n "$CORE_BASE" ]]; then
+    if $IS_BUNDLE; then
+        detail "gemini-cli-core found (not used at runtime by bundle builds)"
+    fi
+    check_file "$SHELL_SVC"      "shellExecutionService.js"
+    check_file "$RETRY_JS"        "retry.js"
+else
+    if $IS_BUNDLE; then
+        detail "Patches 1, 3, 4 target gemini-cli-core (not applicable for bundle builds)"
+    fi
+fi
+if [[ -n "$SHELL_TOOL_MSG" ]]; then
+    check_file "$SHELL_TOOL_MSG"  "ShellToolMessage.js"
+elif $IS_BUNDLE; then
+    detail "ShellToolMessage.js — not applicable (removed in bundle builds)"
+fi
 if [[ -n "$UNIX_TERMINAL" ]]; then
     check_file "$UNIX_TERMINAL"   "unixTerminal.js"
 else
@@ -343,8 +417,11 @@ if [[ "$MODE" == "verify" ]]; then
     PTY_NODE=""
     PLATFORM="$("$NODE_BIN" -e "console.log(process.platform + '-' + process.arch)")"
     for candidate in \
+        "$(dirname "$GEMINI_ROOT")/@lydell/node-pty-${PLATFORM}/pty.node" \
         "$(dirname "$GEMINI_ROOT")/../@lydell/node-pty-${PLATFORM}/pty.node" \
-        "$(dirname "$GEMINI_ROOT")/../@lydell/node-pty/prebuilds/${PLATFORM}/pty.node"; do
+        "$(dirname "$GEMINI_ROOT")/../@lydell/node-pty/prebuilds/${PLATFORM}/pty.node" \
+        "$HOME/.bun/install/global/node_modules/@lydell/node-pty-${PLATFORM}/pty.node" \
+        "$HOME/.bun/install/global/node_modules/@lydell/node-pty/prebuilds/${PLATFORM}/pty.node"; do
         if [[ -f "$candidate" ]]; then
             PTY_NODE="$(resolve_path "$candidate")"
             break
@@ -384,7 +461,7 @@ if [[ "$MODE" == "verify" ]]; then
     fi
 
     step "Checking retry configuration"
-    if [[ -f "$RETRY_JS" ]]; then
+    if [[ -n "$RETRY_JS" && -f "$RETRY_JS" ]]; then
         MAX_ATTEMPTS="$("$NODE_BIN" -e "
             const c = require('fs').readFileSync('$RETRY_JS','utf8');
             const m = c.match(/DEFAULT_MAX_ATTEMPTS\s*=\s*(\d+)/);
@@ -419,6 +496,9 @@ if [[ "$MODE" == "verify" ]]; then
             printf "     ${YELLOW}TerminalQuotaError causes immediate give-up (unpatched).${RESET}\n"
             printf "     ${YELLOW}Run this script to make it retry with backoff.${RESET}\n"
         fi
+    elif $IS_BUNDLE && [[ -z "$CORE_BASE" ]]; then
+        detail "retry.js not available (bundle build, gemini-cli-core not installed)"
+        detail "Retry config is compiled into the bundle and cannot be inspected"
     else
         warn "retry.js not found"
     fi
@@ -432,10 +512,12 @@ fi
 patched=0
 skipped=0
 failed=0
+not_applicable=0
 total=0
 inc_patched() { patched=$((patched + 1)); }
 inc_skipped() { skipped=$((skipped + 1)); }
 inc_failed()  { failed=$((failed + 1));  }
+inc_na()      { not_applicable=$((not_applicable + 1)); }
 inc_total()   { total=$((total + 1)); }
 
 node_replace() {
@@ -652,7 +734,7 @@ P5_NEW="    UnixTerminal.prototype.resize = function (cols, rows) {
 # ── Apply patches ───────────────────────────────────────────────────────────
 
 case "$MODE" in
-    patch)  step "Applying patches (5 node_modules + 2 environment)" ;;
+    patch)  step "Applying patches" ;;
     check)  step "Checking patch status" ;;
     revert) step "Reverting patches" ;;
 esac
@@ -660,29 +742,85 @@ esac
 printf "\n"
 info "Patch 1/7: EBADF catch in shellExecutionService.js"
 detail "resizePty() — add EBADF to the list of safe-to-ignore errors"
-patch_file "$SHELL_SVC" "$P1_MARKER" "$P1_OLD" "$P1_NEW" "shellExecutionService.js EBADF"
+if [[ -z "$SHELL_SVC" ]]; then
+    inc_total
+    if $IS_BUNDLE; then
+        detail "Not applicable — code is compiled into bundle in v0.36.0+"
+        inc_na
+    else
+        warn "shellExecutionService.js — gemini-cli-core not found"
+        inc_failed
+    fi
+else
+    if $IS_BUNDLE; then
+        detail "Note: patching orphaned gemini-cli-core (not used at runtime by bundle build)"
+    fi
+    patch_file "$SHELL_SVC" "$P1_MARKER" "$P1_OLD" "$P1_NEW" "shellExecutionService.js EBADF"
+fi
 
 printf "\n"
 info "Patch 2/7: EBADF catch in ShellToolMessage.js"
 detail "Shell tool resize useEffect — add EBADF + ESRCH checks"
-patch_file "$SHELL_TOOL_MSG" "$P2_MARKER" "$P2_OLD" "$P2_NEW" "ShellToolMessage.js EBADF"
+if [[ -z "$SHELL_TOOL_MSG" ]]; then
+    inc_total
+    if $IS_BUNDLE; then
+        detail "Not applicable — removed in bundle-based builds (v0.36.0+)"
+        inc_na
+    else
+        warn "ShellToolMessage.js — not found"
+        inc_failed
+    fi
+else
+    patch_file "$SHELL_TOOL_MSG" "$P2_MARKER" "$P2_OLD" "$P2_NEW" "ShellToolMessage.js EBADF"
+fi
 
 printf "\n"
 info "Patch 3/7: Retry config in retry.js"
 detail "maxAttempts 10→1000, initialDelay 5s→1s, maxDelay 30s→5s"
 detail "Keeps hammering the API with fast retries until it lets you through"
-patch_file "$RETRY_JS" "$P3_MARKER" "$P3_OLD" "$P3_NEW" "retry.js rate-limit retry"
+if [[ -z "$RETRY_JS" ]]; then
+    inc_total
+    if $IS_BUNDLE; then
+        detail "Not applicable — retry logic is compiled into bundle in v0.36.0+"
+        inc_na
+    else
+        warn "retry.js — gemini-cli-core not found"
+        inc_failed
+    fi
+else
+    if $IS_BUNDLE; then
+        detail "Note: patching orphaned gemini-cli-core (not used at runtime by bundle build)"
+    fi
+    patch_file "$RETRY_JS" "$P3_MARKER" "$P3_OLD" "$P3_NEW" "retry.js rate-limit retry"
+fi
 
 printf "\n"
 info "Patch 4/7: Never bail on TerminalQuotaError in retry.js"
 detail "TerminalQuotaError (daily/overload) normally causes immediate give-up"
 detail "Patched to retry with backoff instead of surrendering"
-patch_file "$RETRY_JS" "$P4_MARKER" "$P4_OLD" "$P4_NEW" "retry.js no-terminal-bail"
+if [[ -z "$RETRY_JS" ]]; then
+    inc_total
+    if $IS_BUNDLE; then
+        detail "Not applicable — retry logic is compiled into bundle in v0.36.0+"
+        inc_na
+    else
+        warn "retry.js — gemini-cli-core not found"
+        inc_failed
+    fi
+else
+    if $IS_BUNDLE; then
+        detail "Note: patching orphaned gemini-cli-core (not used at runtime by bundle build)"
+    fi
+    patch_file "$RETRY_JS" "$P4_MARKER" "$P4_OLD" "$P4_NEW" "retry.js no-terminal-bail"
+fi
 
 printf "\n"
 info "Patch 5/7: EBADF catch at source in unixTerminal.js"
 detail "Belt-and-suspenders: wrap native pty.resize() in try/catch for EBADF/ESRCH"
-patch_file "$UNIX_TERMINAL" "$P5_MARKER" "$P5_OLD" "$P5_NEW" "unixTerminal.js EBADF"
+if $IS_BUNDLE; then
+    detail "This is the primary EBADF fix for bundle builds (@lydell/node-pty loaded at runtime)"
+fi
+patch_file "${UNIX_TERMINAL:-}" "$P5_MARKER" "$P5_OLD" "$P5_NEW" "unixTerminal.js EBADF"
 
 # --- Patch 6: Sanitize ~/.gemini/settings.json hooks ---
 # Remove hooks whose command binary doesn't exist or that use Claude Code's
@@ -882,25 +1020,33 @@ fi
 printf "\n"
 summary_rule
 
+NA_MSG=""
+if [[ $not_applicable -gt 0 ]]; then
+    NA_MSG=", ${not_applicable} n/a"
+fi
+
 case "$MODE" in
     patch)
         if [[ $failed -gt 0 ]]; then
-            printf "  ${WRENCH}  ${YELLOW}${BOLD}%d/%d patched, %d skipped, %d failed${RESET}\n" "$patched" "$total" "$skipped" "$failed"
+            printf "  ${WRENCH}  ${YELLOW}${BOLD}%d/%d patched, %d skipped, %d failed%s${RESET}\n" "$patched" "$total" "$skipped" "$failed" "$NA_MSG"
             detail "Some patches could not be applied — your Gemini CLI version may differ."
         elif [[ $patched -gt 0 ]]; then
-            printf "  ${SPARKLE}  ${GREEN}${BOLD}%d/%d patched, %d already applied${RESET}\n" "$patched" "$total" "$skipped"
+            printf "  ${SPARKLE}  ${GREEN}${BOLD}%d/%d patched, %d already applied%s${RESET}\n" "$patched" "$total" "$skipped" "$NA_MSG"
         else
-            printf "  ${SPARKLE}  ${GREEN}${BOLD}All %d patches already applied — nothing to do${RESET}\n" "$total"
+            printf "  ${SPARKLE}  ${GREEN}${BOLD}All %d applicable patches already applied%s${RESET}\n" "$((total - not_applicable))" "$NA_MSG"
         fi
         if [[ $((patched + skipped)) -gt 0 ]]; then
             printf "\n"
-            if [[ $patched -gt 0 ]] || node_contains "$SHELL_SVC" "$P1_MARKER" 2>/dev/null; then
-                printf "     ${BUG} EBADF resize crash → fixed\n"
+            if [[ -n "$SHELL_SVC" ]] && { [[ $patched -gt 0 ]] || node_contains "$SHELL_SVC" "$P1_MARKER" 2>/dev/null; }; then
+                printf "     ${BUG} EBADF resize crash → fixed (shellExecutionService.js)\n"
             fi
-            if node_contains "$RETRY_JS" "$P3_MARKER" 2>/dev/null; then
+            if [[ -n "$UNIX_TERMINAL" ]] && node_contains "$UNIX_TERMINAL" "$P5_MARKER" 2>/dev/null; then
+                printf "     ${BUG} EBADF resize crash → fixed (unixTerminal.js — native level)\n"
+            fi
+            if [[ -n "$RETRY_JS" ]] && node_contains "$RETRY_JS" "$P3_MARKER" 2>/dev/null; then
                 printf "     ${RETRY} Rate-limit retry: 1000 attempts, 1-5s delay (was 10/30s)\n"
             fi
-            if node_contains "$RETRY_JS" "$P4_MARKER" 2>/dev/null; then
+            if [[ -n "$RETRY_JS" ]] && node_contains "$RETRY_JS" "$P4_MARKER" 2>/dev/null; then
                 printf "     ${RETRY} Quota errors now retry with backoff instead of giving up\n"
             fi
             if [[ -f "$GEMINI_SETTINGS" ]] && ! "$NODE_BIN" -e "const s=JSON.parse(require('fs').readFileSync('$GEMINI_SETTINGS','utf8'));process.exit(s.hooks?1:0)" 2>/dev/null; then
@@ -910,13 +1056,20 @@ case "$MODE" in
                 printf "     ${WRENCH} gmi wrapper PATH: /usr/bin before .bun/bin\n"
             fi
         fi
+        if $IS_BUNDLE && [[ $not_applicable -gt 0 ]]; then
+            printf "\n"
+            detail "Bundle build detected (v0.36.0+): ${not_applicable} patch(es) not applicable."
+            detail "Core logic (retry, shell execution) is compiled into the bundle and"
+            detail "cannot be patched externally. Patch 5 (unixTerminal.js) catches EBADF"
+            detail "at the native PTY level and is the primary fix for bundle builds."
+        fi
         ;;
     check)
         if [[ $failed -gt 0 ]]; then
-            printf "  ${WRENCH}  ${YELLOW}${BOLD}%d/%d patches needed${RESET}\n" "$failed" "$total"
+            printf "  ${WRENCH}  ${YELLOW}${BOLD}%d/%d patches needed%s${RESET}\n" "$failed" "$total" "$NA_MSG"
             detail "Run without --check to apply."
         else
-            printf "  ${SPARKLE}  ${GREEN}${BOLD}All %d patches already applied${RESET}\n" "$total"
+            printf "  ${SPARKLE}  ${GREEN}${BOLD}All %d applicable patches already applied%s${RESET}\n" "$((total - not_applicable))" "$NA_MSG"
         fi
         ;;
     revert)

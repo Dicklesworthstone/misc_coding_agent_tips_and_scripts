@@ -24,7 +24,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | [Moonlight Streaming](#moonlight-streaming-configuration) | Remote desktop to Linux workstation with AV1 encoding | 30 min |
 | [Vault HA Cluster](#hashicorp-vault-ha-cluster) | Single Vault instance is a single point of failure | 45 min |
 | [DevOps CLI Tools](#devops-cli-tools) | Clicking through web dashboards wastes time | 15 min |
-| [Gemini CLI Crash + Retry Fix](#gemini-cli-crash--retry-fix) | Gemini CLI crashes with EBADF and gives up after 3 retries | 10 sec |
+| [Gemini CLI Crash + Retry Fix](#gemini-cli-crash--retry-fix) | Gemini CLI crashes with EBADF and gives up after 10 retries (supports v0.35.x and v0.36.0+ bundle builds) | 10 sec |
 | [Zellij Scroll Wheel Fix](#zellij-scroll-wheel-fix) | Mouse wheel triggers atuin instead of scrollback in Zellij over SSH | 10 min |
 | [Encrypted GitHub Issues](#encrypted-github-issues) | Need to receive sensitive security reports in public repos | 2 min |
 
@@ -659,7 +659,7 @@ Google's Gemini CLI (`@google/gemini-cli`) has two bugs that make it nearly unus
 curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/fix-gemini-cli-ebadf-crash.sh | bash
 ```
 
-**What it patches (4 patches across 3 files, all idempotent):**
+**What it patches (7 patches total — 5 node_modules + 2 environment, all idempotent):**
 
 | Patch | File | Change |
 |:------|:-----|:-------|
@@ -667,6 +667,22 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent
 | EBADF catch #2 | `ShellToolMessage.js` | Add `EBADF` + `ESRCH` checks to shell tool resize useEffect |
 | Aggressive retry | `retry.js` | `maxAttempts` 10 → 1000, `initialDelay` 5s → 1s, `maxDelay` 30s → 5s |
 | Never bail on quota | `retry.js` | `TerminalQuotaError` retries with backoff instead of immediately giving up |
+| EBADF at source | `unixTerminal.js` | Wrap native `pty.resize()` in try/catch for EBADF/ESRCH |
+| Dead hooks | `~/.gemini/settings.json` | Remove hooks pointing to nonexistent binaries |
+| PATH order | `~/.local/bin/gmi` | Ensure `/usr/bin` before `.bun/bin` so real node is used |
+
+<details>
+<summary><strong>⚠️ v0.36.0+ bundle architecture</strong></summary>
+
+Starting with v0.36.0, `gemini-cli` ships as a self-contained bundle — all core logic (retry, shell execution) is compiled into chunk files with mangled identifiers. Patches 1–4 target `@google/gemini-cli-core` source files which are **no longer used at runtime** by the bundle build.
+
+**What still works in v0.36.0+:**
+- **Patch 5 (unixTerminal.js)** — `@lydell/node-pty` is a native addon loaded at runtime, not bundled. This catches EBADF at the source before any higher-level code sees it. This is the primary EBADF fix for bundle builds.
+- **Patches 6–7** — Environment fixes (settings.json, gmi wrapper) are independent of the package architecture.
+
+**What doesn't apply:** Patches 1–4 cannot modify the compiled bundle. If `gemini-cli-core` is still installed (leftover from a prior version), the script will patch it but notes it's not used at runtime.
+
+</details>
 
 <details>
 <summary><strong>Other modes</strong></summary>

@@ -116,7 +116,7 @@ For global protection, use `~/.claude/` instead.
 
 ## Automated Setup Script
 
-Save this script and run it. Supports both project-local and global installation.
+Run [`install-claude-git-guard.sh`](install-claude-git-guard.sh) from the repo root. Supports both project-local and global installation. The full script source is included below for reference.
 
 <details>
 <summary><strong>install-claude-git-guard.sh</strong> (click to expand)</summary>

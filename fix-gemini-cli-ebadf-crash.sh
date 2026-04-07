@@ -281,6 +281,10 @@ find_gemini_root() {
 
 GEMINI_ROOT=""
 if ! GEMINI_ROOT="$(find_gemini_root 2>/dev/null)"; then
+    if [ "${CI:-}" = "true" ] || [ "${NONINTERACTIVE:-}" = "1" ]; then
+        printf "  ${CROSS}  ${RED}%s${RESET}\n" "Gemini CLI not installed — nothing to patch (skipping)"
+        exit 0
+    fi
     fail "Could not find @google/gemini-cli — is it installed globally?"
 fi
 ok "Found: $GEMINI_ROOT"

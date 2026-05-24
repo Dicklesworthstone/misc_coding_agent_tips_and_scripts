@@ -838,17 +838,19 @@ cpfm    # Copy clipboard from Mac
 
 ### Safe Automatic Swap Flushing for Agent Swarms
 
-Run a few Claude or Codex agents on a fat workstation, give them an hour, then check `free -h`:
+**The problem.** Run a few Claude or Codex agents on a fat workstation, give them an hour, then check `free -h`:
 
 ```
-              total        used        free       shared       buff/cache  available
-Mem:          215Gi        66Gi        39Gi       26Gi         150Gi       149Gi
+              total        used        free       shared  buff/cache   available
+Mem:          215Gi        66Gi        39Gi        26Gi       150Gi       149Gi
 Swap:          71Gi        71Gi          0B
 ```
 
-149 GB of RAM available, 71 GB of swap full. An earlier memory spike pushed pages out to disk; now they're cold and won't come back until something touches them. Every touch on a swapped-out page is a random disk read. The whole machine feels sluggish for hours after the actual spike is gone — the *swap paradox*.
+149 GB of RAM available, 71 GB of swap full. The system isn't *currently* under memory pressure — but an earlier spike (a build, a batch of tests, a model briefly spinning up) evicted ~71 GB of pages to disk. The Linux kernel doesn't proactively migrate those pages back. They sit on disk until something touches them, at which point that read pays a slow random-disk seek. The machine feels sluggish for *hours* after the actual spike is gone, even though `top` shows nothing wrong. This is the **swap paradox**.
 
-`sudo swapoff -a && sudo swapon -a` flushes it in one bulk operation. The trick is doing it automatically, without ever OOM-killing the box. This tool installs a systemd timer that fires every 30 minutes and flushes disk swap ONLY when four predicates all hold:
+**The fix.** `sudo swapoff -a && sudo swapon -a` walks every swapped-out page back into RAM in one bulk operation and re-enables swap fresh. Costs a few minutes of mild I/O; restores responsiveness. But it has a sharp edge: **the flush itself can OOM the box** if you don't have enough free RAM to absorb the swapped data. So you can't just slap it in cron.
+
+This tool is the safe automatic version. A systemd timer fires every 30 minutes and runs a small bash script that decides whether to flush based on four predicates:
 
 | Predicate | Default | Protects against |
 |:----------|:--------|:-----------------|
@@ -857,7 +859,21 @@ Swap:          71Gi        71Gi          0B
 | `MAX_MEM_PRESSURE` | 5.0 % PSI avg10 | Piling work onto a memory-stressed host |
 | `MAX_LOAD_RATIO` | 1.0× nproc | Piling work onto a CPU-stressed host |
 
-zram swap isn't counted — it's RAM-backed compressed pages, no random-read latency to restore.
+If **all four** hold, the script runs `swapoff -av && swapon -av` and logs the before/after numbers. Otherwise it logs a skip reason and exits cleanly. Either way, exit code 0 — so `systemctl status swap-flush.service` only goes red on real malfunctions, never on a deliberate skip.
+
+A few smaller design decisions worth highlighting:
+
+- **zram swap doesn't count.** zram is RAM-backed compressed pages, not on disk. There's no random-read latency to restore by flushing it. If your host uses both zram + disk swap, only the disk portion is what we want to drain.
+- **`MEM_SAFETY_FACTOR` is the OOM gate.** With the default 1.5×, on a system with 30 GB of disk swap used, the script requires 45 GB of available RAM before it tries `swapoff -a`. That's the headroom needed for the kernel to migrate pages back without crashing into normal allocations.
+- **Numeric env vars are validated at startup.** A typo like `MEM_SAFETY_FACTOR="1,5"` (comma instead of period) would otherwise make awk silently parse it as 0, defeating the safety check and proceeding with zero headroom. A regex catches this and aborts before any swap manipulation.
+- **5-minute random jitter** prevents fleet-wide hosts from all flushing at exactly `:00` and `:30`. A 13-machine swarm doesn't need 13 simultaneous swapoff storms.
+- **`Type=oneshot`** ensures only one instance runs at a time; the next timer fire waits if the current run is still draining.
+
+Tunable per-host via `/etc/systemd/system/swap-flush.service.d/override.conf` (or `systemctl edit swap-flush.service`). All decisions go to journald under tag `swap-flush`:
+
+```bash
+journalctl -t swap-flush --since today
+```
 
 <details>
 <summary><strong>Quick install</strong></summary>
@@ -866,16 +882,15 @@ zram swap isn't counted — it's RAM-backed compressed pages, no random-read lat
 curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/install-swap-flush.sh | sudo bash
 ```
 
-Lays down `/usr/local/bin/swap-flush`, the `.service`, and the `.timer`. Enables the timer. First fire is 15 minutes after the next boot, then every 30 min with 5-min random jitter so a fleet doesn't all flush at exactly `:00` and `:30`.
+Drops `/usr/local/bin/swap-flush`, the `.service`, and the `.timer` into place. Enables the timer. First fire lands within 5 minutes; then every 30 min thereafter (with up to 5 min of random jitter per fire).
 
-Observe what it decided:
+Preview without making changes:
 
 ```bash
-journalctl -t swap-flush --since today
-systemctl list-timers swap-flush.timer
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/install-swap-flush.sh | sudo bash -s -- --dry-run
 ```
 
-Run it once now (respects all the safety predicates):
+Run it once right now (manually; still respects all four safety predicates):
 
 ```bash
 sudo /usr/local/bin/swap-flush

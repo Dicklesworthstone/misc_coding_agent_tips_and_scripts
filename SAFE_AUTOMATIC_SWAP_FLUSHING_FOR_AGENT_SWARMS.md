@@ -1,6 +1,6 @@
 # Safe Automatic Swap Flushing for AI Agent Swarms
 
-> **TL;DR:** AI coding agents cause memory spikes that leave gigabytes of cold data stuck in disk swap, dragging on responsiveness long after the spike is over. This guide installs a systemd timer that flushes disk swap every 30 minutes — but **only when both worth it AND safe**, so it never causes an OOM or piles work onto a busy box. Two files plus a one-command installer.
+> **TL;DR:** AI coding agents cause memory spikes that leave gigabytes of cold data stuck in disk swap, dragging on responsiveness long after the spike is over. This guide installs a systemd timer that flushes disk swap every 30 minutes — but **only when both worth it AND safe**, so it never causes an OOM or piles work onto a busy box. One-command installer; three files end up on disk.
 
 ## Quick Start
 
@@ -13,9 +13,10 @@ That writes three files (the script and the systemd unit + timer), runs `daemon-
 To uninstall later:
 
 ```bash
-sudo /usr/local/bin/swap-flush --help   # see options
 curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/install-swap-flush.sh | sudo bash -s -- --uninstall
 ```
+
+The installer also accepts `--dry-run` (preview what it would do) and `--help`.
 
 ---
 
@@ -34,7 +35,7 @@ Swap:          71Gi        71Gi          0B
 
 So when an agent comes back to a session it parked an hour ago — opens a buffer, reads its scrollback, asks a question that needs to walk a process tree — every touch on a swapped-out page is a **random disk read**, often blocking other work. The whole machine feels sluggish even though `top` shows nothing wrong.
 
-The fix is simple. `sudo swapoff -a && sudo swapon -a` forces the kernel to migrate every swapped-out page back into RAM in one bulk operation, then re-enable swap fresh. Five minutes of mild I/O for restored responsiveness. The catch is **the flush itself can OOM the box** if you don't leave enough RAM headroom — and on a fleet of agent swarm hosts you don't want to remember to babysit this manually.
+The fix is simple. `sudo swapoff -a && sudo swapon -a` forces the kernel to migrate every swapped-out page back into RAM in one bulk operation, then re-enable swap fresh. A few minutes of mild I/O (longer for hundreds of GB) for restored responsiveness. The catch is **the flush itself can OOM the box** if you don't leave enough RAM headroom — and on a fleet of agent swarm hosts you don't want to remember to babysit this manually.
 
 ## At a Glance
 
@@ -216,7 +217,7 @@ systemctl status swap-flush.service
 
 ### Why the artificial 15-minute boot delay
 
-`OnBootSec=15min` keeps the first fire from happening during the messiest part of system startup, when other services are still settling and PSI isn't yet meaningful. On a long-uptime host the timer fires effectively immediately after enable (`15min` is in the past), so it doesn't add lag to a manual install.
+`OnBootSec=15min` keeps the first fire from happening during the messiest part of system startup, when other services are still settling and PSI isn't yet meaningful. On a long-uptime host (boot was already more than 15 minutes ago at enable-time) the timer is eligible to fire immediately; in practice `RandomizedDelaySec=5min` means the first fire lands within five minutes of enable, not later.
 
 ### Validation as a load-bearing safety check
 

@@ -11,6 +11,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | [Host-Aware Terminal Colors](#host-aware-color-themes) | Can't tell which terminal is connected to production | 5-15 min |
 | [WezTerm Persistent Sessions](#wezterm-persistent-remote-sessions) | Remote terminal sessions die when Mac sleeps or reboots | 20 min |
 | [WezTerm Mux Tuning for Agent Swarms](#wezterm-mux-tuning-for-agent-swarms) | Mux server becomes unresponsive with 20+ agents | 5 min |
+| [Safe Auto Swap Flushing](#safe-automatic-swap-flushing-for-agent-swarms) | Host stays sluggish after a memory spike because cold pages are stuck in disk swap | 1 min |
 | [Ghostty Terminfo for Remote Machines](#ghostty-terminfo-for-remote-machines) | Numpad Enter shows `[57414u` garbage when SSH'd | 2 min |
 | [macOS NFS Auto-Mount](#macos-nfs-auto-mount) | Have to manually mount remote dev server after every reboot | 10 min |
 | [Budget 10GbE Direct Link](#budget-10gbe-direct-link) | File transfers crawl at 100MB/s through gigabit switch | 30 min |
@@ -834,6 +835,71 @@ cpfm    # Copy clipboard from Mac
 ---
 
 ## Infrastructure
+
+### Safe Automatic Swap Flushing for Agent Swarms
+
+Run a few Claude or Codex agents on a fat workstation, give them an hour, then check `free -h`:
+
+```
+              total        used        free       shared       buff/cache  available
+Mem:          215Gi        66Gi        39Gi       26Gi         150Gi       149Gi
+Swap:          71Gi        71Gi          0B
+```
+
+149 GB of RAM available, 71 GB of swap full. An earlier memory spike pushed pages out to disk; now they're cold and won't come back until something touches them. Every touch on a swapped-out page is a random disk read. The whole machine feels sluggish for hours after the actual spike is gone — the *swap paradox*.
+
+`sudo swapoff -a && sudo swapon -a` flushes it in one bulk operation. The trick is doing it automatically, without ever OOM-killing the box. This tool installs a systemd timer that fires every 30 minutes and flushes disk swap ONLY when four predicates all hold:
+
+| Predicate | Default | Protects against |
+|:----------|:--------|:-----------------|
+| `MIN_DISK_SWAP_GB` | 4 GB | Doing the work for a trivial reclaim |
+| `MEM_SAFETY_FACTOR` | 1.5× | OOM during the migrate-pages-back operation |
+| `MAX_MEM_PRESSURE` | 5.0 % PSI avg10 | Piling work onto a memory-stressed host |
+| `MAX_LOAD_RATIO` | 1.0× nproc | Piling work onto a CPU-stressed host |
+
+zram swap isn't counted — it's RAM-backed compressed pages, no random-read latency to restore.
+
+<details>
+<summary><strong>Quick install</strong></summary>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/install-swap-flush.sh | sudo bash
+```
+
+Lays down `/usr/local/bin/swap-flush`, the `.service`, and the `.timer`. Enables the timer. First fire is 15 minutes after the next boot, then every 30 min with 5-min random jitter so a fleet doesn't all flush at exactly `:00` and `:30`.
+
+Observe what it decided:
+
+```bash
+journalctl -t swap-flush --since today
+systemctl list-timers swap-flush.timer
+```
+
+Run it once now (respects all the safety predicates):
+
+```bash
+sudo /usr/local/bin/swap-flush
+```
+
+Override defaults per-host:
+
+```bash
+sudo systemctl edit swap-flush.service
+# [Service]
+# Environment=MEM_SAFETY_FACTOR=2.0
+```
+
+Uninstall:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/install-swap-flush.sh | sudo bash -s -- --uninstall
+```
+
+</details>
+
+**[Full guide →](SAFE_AUTOMATIC_SWAP_FLUSHING_FOR_AGENT_SWARMS.md)** | **[Script →](swap-flush)** | **[Installer →](install-swap-flush.sh)**
+
+---
 
 ### HashiCorp Vault HA Cluster
 

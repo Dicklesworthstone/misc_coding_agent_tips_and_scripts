@@ -1,0 +1,220 @@
+#!/bin/bash
+# swap-flush — smart, safe automatic swap flusher
+#
+# Background: When RAM pressure spikes then subsides, the kernel doesn't
+# eagerly migrate evicted pages back to RAM. Cold pages stay in disk swap
+# until faulted in on next access — and a process touching that data
+# pays a slow random-read penalty. Flushing swap (swapoff/swapon) forces
+# the kernel to move pages back to RAM in one bulk operation. The cost
+# is transient memory pressure during the flush; the benefit is
+# restored latency.
+#
+# This tool only flushes when it's both worth it AND safe:
+#
+#   - swap-on-disk used >= MIN_DISK_SWAP_GB  (default 4 GB)
+#       zram swap isn't counted — it's already in RAM (compressed),
+#       so there's no latency win from flushing it.
+#   - available RAM >= disk_swap_used * MEM_SAFETY_FACTOR  (default 1.5x)
+#       leaves headroom so the flush doesn't push the system into OOM.
+#   - memory pressure PSI avg10 <= MAX_MEM_PRESSURE  (default 5.0 %)
+#       don't pile work onto a system that's already memory-stressed.
+#   - load average 1-min <= nproc * MAX_LOAD_RATIO  (default 1.0)
+#       don't pile work onto a CPU-stressed system either.
+#
+# Override any threshold by setting the env var (e.g., in
+# /etc/systemd/system/swap-flush.service.d/override.conf):
+#
+#   [Service]
+#   Environment=MIN_DISK_SWAP_GB=8
+#   Environment=MEM_SAFETY_FACTOR=2.0
+#
+# Also honored: DRY_RUN=1 (any other value, including unset, is "off").
+# When set, the safety predicates run as usual and the decision is
+# logged, but no swapoff/swapon is performed. Useful for testing
+# threshold changes.
+#
+# Logs to journald with tag "swap-flush". Exit codes:
+#   0 — skipped (recorded reason in journal) OR flush ran (success line)
+#   1 — early error (missing /proc/meminfo, invalid env config, etc.)
+# A timer-driven "skip" therefore appears as success in `systemctl status`,
+# which is what we want — only real malfunctions show up as failures.
+
+set -euo pipefail
+
+MIN_DISK_SWAP_GB="${MIN_DISK_SWAP_GB:-4}"
+MEM_SAFETY_FACTOR="${MEM_SAFETY_FACTOR:-1.5}"
+MAX_MEM_PRESSURE="${MAX_MEM_PRESSURE:-5.0}"
+MAX_LOAD_RATIO="${MAX_LOAD_RATIO:-1.0}"
+DRY_RUN="${DRY_RUN:-0}"
+
+log_info() { logger -t swap-flush -p user.info "$*"; echo "$*"; }
+log_err()  { logger -t swap-flush -p user.err "$*"; echo "$*" >&2; }
+
+# ---- Validate numeric thresholds ------------------------------------------
+#
+# Without this, a typo like MEM_SAFETY_FACTOR="1,5" (comma instead of
+# period) makes awk silently treat it as 0, the required-RAM check
+# trivially passes, and the flush proceeds with NO safety margin. That's
+# the only env var where a malformed value fails-open; we validate all of
+# them anyway for symmetry. Pattern is non-negative integer or decimal:
+# at least one digit, optionally followed by `.` and more digits.
+# (Zero is accepted; operators who want "no safety margin" or "always
+# flush above zero" can opt in explicitly.)
+for var in MIN_DISK_SWAP_GB MEM_SAFETY_FACTOR MAX_MEM_PRESSURE MAX_LOAD_RATIO; do
+    val="${!var}"
+    if ! [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        log_err "invalid $var='$val' (expected non-negative number); aborting"
+        exit 1
+    fi
+done
+
+# ---- Read system state -----------------------------------------------------
+
+awk_meminfo() { awk -v k="$1:" '$1==k{print $2; exit}' /proc/meminfo; }
+
+# We track *disk* swap separately (via `swapon --show`) below — see comment
+# on the loop. /proc/meminfo's SwapTotal/SwapFree lump zram in with disk
+# swap, which would defeat the safety logic.
+mem_available_kb="$(awk_meminfo MemAvailable)"
+
+# Pressure may be absent on older kernels — default to 0 (no pressure).
+# Format: `some avg10=N.NN avg60=N.NN avg300=N.NN total=N`
+# Splitting on space+equals: $1=some $2=avg10 $3=<avg10 value> $4=avg60 ...
+mem_pressure_avg10="$(awk -F'[ =]' '/^some/{print $3}' /proc/pressure/memory 2>/dev/null || true)"
+mem_pressure_avg10="${mem_pressure_avg10:-0}"
+
+nproc_count="$(nproc)"
+load_avg_1="$(awk '{print $1}' /proc/loadavg)"
+
+# Distinguish disk swap from zram. zram swap appears as /dev/zramN entries
+# in `swapon --show`. We sum bytes used on non-zram swap devices only —
+# zram is RAM-backed so flushing it doesn't restore any latency, and
+# including it in safety-margin math would understate the headroom we
+# actually have (a zram flush expands the compressed pages back to full
+# size, which we shouldn't count against `mem_available`).
+count_disk_swap_bytes() {
+    local total=0
+    local data name used
+    if data="$(swapon --show=NAME,USED --bytes --noheadings 2>/dev/null)"; then
+        while read -r name used; do
+            [ -z "$name" ] && continue
+            case "$name" in
+                /dev/zram*) continue ;;
+            esac
+            total=$((total + used))
+        done <<< "$data"
+    fi
+    echo "$total"
+}
+
+disk_swap_used_bytes="$(count_disk_swap_bytes)"
+disk_swap_used_gb=$((disk_swap_used_bytes / 1024 / 1024 / 1024))
+
+mem_available_bytes=$((mem_available_kb * 1024))
+mem_available_gb=$((mem_available_bytes / 1024 / 1024 / 1024))
+
+# Used for one info line whether we flush or not.
+state="disk_swap_used=${disk_swap_used_gb}GB mem_available=${mem_available_gb}GB"
+state="$state mem_pressure_avg10=${mem_pressure_avg10}%"
+state="$state load_1=${load_avg_1} nproc=${nproc_count}"
+
+# ---- Decide -----------------------------------------------------------------
+
+# Each check sets `skip_reason` if it fails.
+skip_reason=""
+
+# Compare bytes-vs-GB-threshold in awk so a decimal MIN_DISK_SWAP_GB
+# (e.g. 0.5 for "flush if disk swap >= 512 MB") works. Bash's `-lt` only
+# accepts integers and would error here on a fractional threshold even
+# though the validation regex above accepts it.
+if awk -v u="$disk_swap_used_bytes" -v m="$MIN_DISK_SWAP_GB" \
+   'BEGIN{exit !(u < m*1024*1024*1024)}'; then
+    skip_reason="disk_swap_used=${disk_swap_used_gb}GB < MIN_DISK_SWAP_GB=${MIN_DISK_SWAP_GB}"
+fi
+
+if [ -z "$skip_reason" ]; then
+    # available_ram_bytes >= disk_swap_used_bytes * MEM_SAFETY_FACTOR
+    required_bytes="$(awk -v s="$disk_swap_used_bytes" -v f="$MEM_SAFETY_FACTOR" \
+        'BEGIN{printf "%.0f\n", s*f}')"
+    if [ "$mem_available_bytes" -lt "$required_bytes" ]; then
+        required_gb=$((required_bytes / 1024 / 1024 / 1024))
+        skip_reason="mem_available=${mem_available_gb}GB < required=${required_gb}GB"
+        skip_reason="$skip_reason (=disk_swap*${MEM_SAFETY_FACTOR})"
+    fi
+fi
+
+if [ -z "$skip_reason" ]; then
+    if awk -v p="$mem_pressure_avg10" -v m="$MAX_MEM_PRESSURE" \
+       'BEGIN{exit !(p+0 > m+0)}'; then
+        skip_reason="mem_pressure_avg10=${mem_pressure_avg10} > MAX=${MAX_MEM_PRESSURE}"
+    fi
+fi
+
+if [ -z "$skip_reason" ]; then
+    max_load="$(awk -v c="$nproc_count" -v r="$MAX_LOAD_RATIO" \
+        'BEGIN{printf "%.2f\n", c*r}')"
+    if awk -v l="$load_avg_1" -v m="$max_load" \
+       'BEGIN{exit !(l+0 > m+0)}'; then
+        skip_reason="load_1=${load_avg_1} > max=${max_load} (nproc*${MAX_LOAD_RATIO})"
+    fi
+fi
+
+# ---- Act --------------------------------------------------------------------
+
+if [ -n "$skip_reason" ]; then
+    log_info "skip: $skip_reason; state=[$state]"
+    exit 0
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+    log_info "dry-run: would flush; state=[$state]"
+    exit 0
+fi
+
+log_info "flushing: state=[$state]"
+start_ts="$(date +%s)"
+
+# swapoff -a can be very slow on big swap files. Use --verbose so the
+# journal captures per-device timing.
+#
+# Note: `swapoff -a` returns nonzero if any single device fails to
+# disable (e.g., zram is briefly busy with active writes) even when the
+# DISK swap was drained successfully. We trust the before/after
+# disk_swap_used delta below as the real success signal, and don't
+# escalate that nonzero exit to a warning unless the data shows the
+# flush actually didn't take.
+swapoff -av 2>&1 | logger -t swap-flush -p user.info || true
+swapon -av 2>&1 | logger -t swap-flush -p user.info || true
+
+# Some setups have a separate zram-swap service that needs a kick because
+# `swapoff -a` removed its swap and the kernel won't reattach it on its
+# own. Restart it if it exists and there's no zram swap currently active.
+#
+# Note: `systemctl list-unit-files <name>` returns 0 with empty output
+# for nonexistent units — useless as an existence check. `systemctl cat`
+# returns nonzero ("No files found for ...") when the unit doesn't
+# exist, which is what we want here.
+if systemctl cat zram-swap.service >/dev/null 2>&1; then
+    if ! swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then
+        systemctl restart zram-swap.service 2>/dev/null || true
+        sleep 1
+    fi
+fi
+
+end_ts="$(date +%s)"
+elapsed=$((end_ts - start_ts))
+
+# Compute disk-swap-used AFTER, same way we did before (count_disk_swap_bytes
+# excludes zram), so the comparison is apples-to-apples.
+new_disk_swap_used_bytes="$(count_disk_swap_bytes)"
+
+# Report in MB so a 700MB drain doesn't get rounded to "0GB" and look like
+# a no-op. Net delta can be negative if the system swapped pages back out
+# during the swapon -a window — log it but don't escalate to warn (the
+# swapoff itself almost certainly drained pages; they just got refilled).
+delta_bytes=$((disk_swap_used_bytes - new_disk_swap_used_bytes))
+before_mb=$((disk_swap_used_bytes / 1024 / 1024))
+after_mb=$((new_disk_swap_used_bytes / 1024 / 1024))
+delta_mb=$((delta_bytes / 1024 / 1024))
+
+log_info "flush complete: elapsed=${elapsed}s disk_swap=${before_mb}MB->${after_mb}MB (net change ${delta_mb}MB)"

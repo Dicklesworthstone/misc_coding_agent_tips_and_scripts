@@ -379,7 +379,9 @@ Unified aliases for all three major AI coding agents:
 # Claude Code (native install)
 alias cc='~/.local/bin/claude --dangerously-skip-permissions'
 
-# Gemini CLI
+# Antigravity CLI (Google's successor to the retired Gemini CLI; model-pinned)
+agy() { command agy --model "Gemini 3.1 Pro (High)" --dangerously-skip-permissions "$@"; }
+# Gemini CLI — LEGACY (retired 2026-06-18; kept only to read old ~/.gemini/tmp history)
 alias gmi='gemini --yolo --model gemini-2.5-pro'
 
 # Codex (OpenAI)

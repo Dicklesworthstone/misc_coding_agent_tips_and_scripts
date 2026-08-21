@@ -6,6 +6,17 @@ This project has no formal versioning or GitHub Releases. There are no tags. Cha
 
 ---
 
+## Local LLM Serving
+
+### Qwen3.8-27B-Uncensored-FP8 on Dual RTX 4090s (vLLM + omp)
+
+An idempotent installer + guide for serving the abliterated Qwen3.8-27B block-FP8 checkpoint on two consumer RTX 4090s with the latest vLLM, tuned Triton FP8 kernel configs (L40S→4090 sm_89 analogs, +87% concurrent throughput measured), MTP speculative decoding, and registration as a keyless `vllm` provider in omp. Ships `qwenserve` (tuned launcher) and `qwenstop` (VRAM-freeing stop) commands; HF-gated download with no-login ModelScope alternative.
+
+**Initial release** (2026-08-21):
+- Add `install-qwen38-uncensored.sh` and `QWEN38_UNCENSORED_ON_DUAL_4090_WITH_VLLM_AND_OMP.md`
+
+---
+
 ## AI Agent Safety
 
 ### Destructive Git Command Protection

@@ -28,6 +28,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | [Gemini CLI Crash + Retry Fix](#gemini-cli-crash--retry-fix) | Gemini CLI crashes with EBADF and gives up after 10 retries (supports v0.35.x and v0.36.0+ bundle builds) | 10 sec |
 | [Zellij Scroll Wheel Fix](#zellij-scroll-wheel-fix) | Mouse wheel triggers atuin instead of scrollback in Zellij over SSH | 10 min |
 | [Encrypted GitHub Issues](#encrypted-github-issues) | Need to receive sensitive security reports in public repos | 2 min |
+| [Qwen3.8-27B on Dual 4090s](#qwen38-27b-uncensored-on-dual-rtx-4090s) | Want a strong local uncensored coding/research model served by vLLM and wired into omp | 15 min + downloads |
 
 ---
 
@@ -1115,6 +1116,28 @@ age encrypts but does **not** authenticate the sender. Anyone with your public k
 **[Script source →](gh-issue-decrypt)** | **[Full Claude Code session transcript →](https://dicklesworthstone.github.io/misc_coding_agent_tips_and_scripts/cc_session_making_encrypted_gh_issues_system.html)** *(the full Claude Code session that built this system: 19 human prompts, ~400 tool calls, from initial concept through fleet testing)*
 
 ---
+
+## Local LLM Serving
+
+### Qwen3.8-27B-Uncensored on Dual RTX 4090s
+
+> **Origin story:** Wanted the abliterated Qwen3.8-27B (hybrid Gated DeltaNet + full attention, MTP draft head, 262K context) running locally on two consumer 4090s and usable as a first-class omp provider. Turns out it fits — with FP8 KV cache and per-device Triton kernel tuning.
+
+**Install (idempotent, safe to re-run):**
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/install-qwen38-uncensored.sh?$(date +%s)" | bash
+```
+
+By default that preflights hardware, installs uv + latest vLLM (isolated Python 3.12 venv), downloads the 31 GB weights (ModelScope no-login mirror, or Hugging Face if you're authed), installs tuned FP8 kernel configs, drops `qwenserve`/`qwenstop` in `~/.local/bin`, and registers the server as a keyless `vllm` provider in omp. It does not start anything or touch systemd unless asked. Key options: `--dry-run`, `--verify`, `--start` (launch + e2e smoke test), `--with-service` (systemd auto-start), `--hf`/`--modelscope`, `--quiet`, `--uninstall [--purge]`, `--port`, `--data-root`.
+
+Full guide: [`QWEN38_UNCENSORED_ON_DUAL_4090_WITH_VLLM_AND_OMP.md`](QWEN38_UNCENSORED_ON_DUAL_4090_WITH_VLLM_AND_OMP.md) — installer: [`install-qwen38-uncensored.sh`](install-qwen38-uncensored.sh)
+
+- Copies same-arch (sm_89) L40S Triton FP8 kernel configs for the 4090 — measured **+87%** on 8-way concurrent aggregate throughput (84.6 → 158 tok/s)
+- `qwenserve`: TP=2, FP8 KV, MTP speculative decoding, 160K context, qwen3 reasoning + tool parsers. `qwenstop`: graceful stop, waits for VRAM drain, prints idle power
+- Then: `omp --model vllm/Qwen3.8-27B-Uncensored`
+
+⚠️ The checkpoint has refusal alignment removed (abliterated) — research/red-teaming use only; add your own moderation before anything user-facing.
 
 ## Tech Stack
 

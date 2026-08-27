@@ -293,13 +293,13 @@ dir_latest_mtime() {
 
     local latest=""
     if stat -c %Y "$dir" &> /dev/null; then
-        latest=$(find "$dir" -type f -print 2>/dev/null | while read -r file; do
-            stat -c %Y "$file"
-        done | sort -n | tail -1)
+        latest=$(find "$dir" -type f -printf '%T@\n' 2>/dev/null \
+            | awk -F. '{ printf "%s%s\n", $1, substr($2 "000000000", 1, 9) }' \
+            | LC_ALL=C sort | tail -1)
     else
-        latest=$(find "$dir" -type f -print 2>/dev/null | while read -r file; do
-            stat -f %m "$file"
-        done | sort -n | tail -1)
+        latest=$(find "$dir" -type f -exec stat -f %Fm {} + 2>/dev/null \
+            | awk -F. '{ printf "%s%s\n", $1, substr($2 "000000000", 1, 9) }' \
+            | LC_ALL=C sort | tail -1)
     fi
 
     if [[ -z "$latest" ]]; then
@@ -307,7 +307,7 @@ dir_latest_mtime() {
         return
     fi
 
-    printf "%.0f\n" "$latest"
+    printf "%s\n" "$latest"
 }
 
 sync_skill() {

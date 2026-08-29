@@ -6,6 +6,19 @@ This project has no formal versioning or GitHub Releases. There are no tags. Cha
 
 ---
 
+## AI Agent Harness Management
+
+### Universal Coding Agent (UCA) Harness Updater & Status Dashboard (UCAS)
+
+A production-grade CLI and telemetry system for managing updates across 5 AI coding agent harnesses (**Claude Code**, **OpenAI Codex**, **Google Antigravity**, **xAI Grok**, and **OMP**). Includes automatic 3-hour background scheduling (systemd user timers on Linux and launchd on macOS), Charmbracelet Gum dashboard visualization with dual-path ANSI fallback, live version change tracking (`"From version xyz to version abc"`), atomic locking with stale PID protection, and health diagnostics (`uca doctor`). Built following the `/installer-workmanship` standard.
+
+**Initial release** (2026-08-29):
+- Add `uca` (main updater & dashboard engine)
+- Add `install-uca.sh` (workmanship-compliant installer with preflight, atomic lock, and diagnostics)
+- Add `UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md` (comprehensive documentation guide)
+
+---
+
 ## Local LLM Serving
 
 ### Qwen3.8-27B-Uncensored-FP8 on Dual RTX 4090s (vLLM + omp)
@@ -352,5 +365,8 @@ Current files in the repository (latest commit on main: [`25d8243`](https://gith
 | `HASHICORP_VAULT_HA_CLUSTER_SETUP.md` | Infrastructure Guide |
 | `BEADS_SETUP.md` | Setup Guide |
 | `cc_session_making_encrypted_gh_issues_system.html` | Session Transcript |
+| `uca` | AI Agent Management |
+| `install-uca.sh` | AI Agent Management |
+| `UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md` | AI Agent Management |
 | `gh_og_share_image.png` | Branding |
 | `LICENSE` | MIT + OpenAI/Anthropic Rider |

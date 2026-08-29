@@ -1,0 +1,1210 @@
+#!/usr/bin/env python3
+"""
+UCA — Universal Coding Agent Harness Updater & Version Tracker
+Crafted with production-grade installer-workmanship patterns:
+  • Charmbracelet Gum styling with seamless ANSI box-drawing fallback
+  • Atomic lock management with stale PID detection
+  • Live semver tracking and transition history ("From version xyz to version abc")
+  • Spinners for slow network operations
+  • Universal 3-hour background scheduling (launchd on macOS, systemd on Linux)
+  • Comprehensive health diagnostics (uca doctor)
+
+Harnesses Managed:
+  • Claude Code (claude update)
+  • OpenAI Codex (bun install -g @openai/codex@latest)
+  • Google Antigravity (agy update)
+  • xAI Grok (grok update)
+  • OMP (omp update)
+
+Usage:
+  uca                 Update all agent harnesses sequentially
+  ucas                Show status dashboard, recent version changes, and schedule
+  uca status          Show status dashboard (alias for ucas)
+  uca <harness>       Update a specific harness (e.g. 'uca omp', 'uca claude')
+  uca doctor          Run preflight diagnostics & self-test
+  uca service install Install 3-hour background auto-updater service
+  uca service status  Show background service/timer status
+  uca check           Probe versions without running updates
+
+Options:
+  -q, --quiet         Minimal output (for automated / cron / service runs)
+  --dry-run           Check versions without applying updates
+  --no-gum            Disable gum styling and use ANSI fallback
+  --json              Output status in machine-readable JSON format
+  -h, --help          Show this help message
+"""
+
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+# Base Paths
+STATE_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "uca"
+STATE_FILE = STATE_DIR / "state.json"
+LOCK_DIR = STATE_DIR / ".lock"
+LOG_FILE = STATE_DIR / "uca.log"
+ERROR_LOG_FILE = STATE_DIR / "uca-error.log"
+SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
+LAUNCHD_DIR = Path.home() / "Library" / "LaunchAgents"
+
+# ANSI Fallback Colors
+class ANSI:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    ITALIC = "\033[3m"
+    BLUE = "\033[38;5;39m"
+    GREEN = "\033[38;5;42m"
+    YELLOW = "\033[38;5;214m"
+    RED = "\033[38;5;196m"
+    MAGENTA = "\033[38;5;212m"
+    GRAY = "\033[38;5;245m"
+    WHITE = "\033[38;5;252m"
+
+ANSI_STRIP_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
+
+def strip_ansi(s: str) -> str:
+    return ANSI_STRIP_RE.sub("", s)
+
+def visible_len(s: str) -> int:
+    return len(strip_ansi(s))
+
+def pad_str(s: str, width: int, align: str = "left") -> str:
+    vlen = visible_len(s)
+    pad = max(0, width - vlen)
+    if align == "right":
+        return " " * pad + s
+    elif align == "center":
+        left = pad // 2
+        right = pad - left
+        return " " * left + s + " " * right
+    return s + " " * pad
+
+# Global Settings
+NO_GUM = False
+FORCE_COLOR = False
+
+def use_color() -> bool:
+    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+        return False
+    return sys.stdout.isatty() or FORCE_COLOR
+
+def c(text: str, *styles: str) -> str:
+    if not use_color():
+        return strip_ansi(str(text))
+    return "".join(styles) + str(text) + ANSI.RESET
+
+def has_gum() -> bool:
+    if NO_GUM:
+        return False
+    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+        return False
+    gum_bin = shutil.which("gum")
+    return bool(gum_bin and (sys.stdout.isatty() or FORCE_COLOR))
+
+def gum_style(*args: str, text: str = "") -> str:
+    gum_bin = shutil.which("gum")
+    if not gum_bin:
+        return text
+    cmd = [gum_bin, "style"] + list(args)
+    if text:
+        cmd.append(text)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        return r.stdout.rstrip("\n")
+    except Exception:
+        return text
+
+# Atomic Locking with Stale PID Detection
+class AtomicLock:
+    def __init__(self, lock_dir: Path):
+        self.lock_dir = lock_dir
+        self.acquired = False
+
+    def acquire(self) -> bool:
+        self.lock_dir.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.mkdir(self.lock_dir)
+            self.acquired = True
+            with open(self.lock_dir / "pid", "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+            return True
+        except FileExistsError:
+            # Check stale lock
+            pid_file = self.lock_dir / "pid"
+            if pid_file.exists():
+                try:
+                    with open(pid_file, "r", encoding="utf-8") as f:
+                        old_pid = int(f.read().strip())
+                    os.kill(old_pid, 0)
+                    return False
+                except (ValueError, ProcessLookupError, PermissionError):
+                    pass
+            
+            # Clean up stale lock
+            try:
+                if pid_file.exists():
+                    pid_file.unlink()
+                os.rmdir(self.lock_dir)
+                os.mkdir(self.lock_dir)
+                self.acquired = True
+                with open(self.lock_dir / "pid", "w", encoding="utf-8") as f:
+                    f.write(str(os.getpid()))
+                return True
+            except Exception:
+                return False
+
+    def release(self) -> None:
+        if self.acquired and self.lock_dir.exists():
+            try:
+                pid_file = self.lock_dir / "pid"
+                if pid_file.exists():
+                    pid_file.unlink()
+                os.rmdir(self.lock_dir)
+            except Exception:
+                pass
+            self.acquired = False
+
+    def __enter__(self):
+        if not self.acquire():
+            print(c("⚠ Another UCA process is currently running. Skipping execution.", ANSI.YELLOW), file=sys.stderr)
+            sys.exit(0)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+# Harness Registry
+HARNESS_CONFIGS = [
+    {
+        "key": "claude",
+        "name": "Claude Code",
+        "binary_candidates": ["claude", str(Path.home() / ".local" / "bin" / "claude")],
+        "version_cmd": ["claude", "--version"],
+        "update_cmd": ["claude", "update"],
+        "fallback_update_cmd": [str(Path.home() / ".local" / "bin" / "claude"), "update"],
+    },
+    {
+        "key": "codex",
+        "name": "OpenAI Codex",
+        "binary_candidates": [
+            "codex",
+            str(Path.home() / ".bun" / "bin" / "codex"),
+            str(Path.home() / ".local" / "bin" / "codex"),
+        ],
+        "version_cmd": ["codex", "--version"],
+        "update_cmd": ["bun", "install", "-g", "@openai/codex@latest"],
+        "fallback_update_cmd": ["codex", "update"],
+    },
+    {
+        "key": "agy",
+        "name": "Google Antigravity",
+        "binary_candidates": ["agy", str(Path.home() / ".local" / "bin" / "agy")],
+        "version_cmd": ["agy", "--version"],
+        "update_cmd": ["agy", "update"],
+        "fallback_update_cmd": [str(Path.home() / ".local" / "bin" / "agy"), "update"],
+    },
+    {
+        "key": "grok",
+        "name": "xAI Grok",
+        "binary_candidates": [
+            "grok",
+            str(Path.home() / ".local" / "bin" / "grok"),
+            str(Path.home() / ".grok" / "bin" / "grok"),
+        ],
+        "version_cmd": ["grok", "--version"],
+        "update_cmd": ["grok", "update"],
+        "fallback_update_cmd": [str(Path.home() / ".local" / "bin" / "grok"), "update"],
+    },
+    {
+        "key": "omp",
+        "name": "OMP",
+        "binary_candidates": [
+            "omp",
+            str(Path.home() / ".bun" / "bin" / "omp"),
+            str(Path.home() / ".local" / "bin" / "omp"),
+        ],
+        "version_cmd": ["omp", "--version"],
+        "update_cmd": ["omp", "update"],
+        "fallback_update_cmd": [str(Path.home() / ".bun" / "bin" / "omp"), "update"],
+    },
+]
+
+def get_env_with_extra_paths() -> Dict[str, str]:
+    """Ensure standard user binary directories & proxy environment variables are in PATH."""
+    env = os.environ.copy()
+    current_path = env.get("PATH", "")
+    extra_dirs = [
+        str(Path.home() / ".local" / "bin"),
+        str(Path.home() / ".bun" / "bin"),
+        str(Path.home() / ".grok" / "bin"),
+        str(Path.home() / ".cargo" / "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ]
+    path_parts = current_path.split(":") if current_path else []
+    for d in extra_dirs:
+        if d not in path_parts and os.path.isdir(d):
+            path_parts.insert(0, d)
+    env["PATH"] = ":".join(path_parts)
+    return env
+
+def find_executable(candidates: List[str]) -> Optional[str]:
+    env = get_env_with_extra_paths()
+    for cand in candidates:
+        expanded = os.path.expanduser(cand)
+        if os.path.isabs(expanded) and os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+            return expanded
+        which_path = shutil.which(cand, path=env.get("PATH"))
+        if which_path:
+            return which_path
+    return None
+
+def extract_clean_version(raw: str) -> str:
+    """Extract clean semver / version string from command output."""
+    raw = raw.strip()
+    if not raw:
+        return "unknown"
+    m = re.search(r"(?:^|[\s/vV:])(\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.]+)?(?:\+[a-zA-Z0-9.]+)?)\b", raw)
+    if m:
+        return m.group(1)
+    first_line = raw.splitlines()[0].strip()
+    return first_line[:30]
+
+def query_harness_version(cfg: Dict[str, Any]) -> Tuple[Optional[str], str]:
+    """Returns (clean_version, raw_output)."""
+    bin_path = find_executable(cfg["binary_candidates"])
+    if not bin_path:
+        return None, "Binary not found"
+    
+    cmd = [bin_path] + cfg["version_cmd"][1:]
+    try:
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+            env=get_env_with_extra_paths()
+        )
+        output = (res.stdout or res.stderr).strip()
+        if res.returncode == 0 or output:
+            return extract_clean_version(output), output
+        return None, f"Exit code {res.returncode}: {output}"
+    except Exception as e:
+        return None, str(e)
+
+def load_state() -> Dict[str, Any]:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "version": 1,
+        "last_run_at": None,
+        "last_run_duration_secs": 0.0,
+        "last_run_status": None,
+        "most_recently_updated": None,
+        "harnesses": {},
+    }
+
+def save_state(state: Dict[str, Any]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_file = STATE_DIR / f"state.json.tmp.{os.getpid()}"
+    try:
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_file, STATE_FILE)
+    except Exception as e:
+        if tmp_file.exists():
+            try:
+                tmp_file.unlink()
+            except Exception:
+                pass
+        raise e
+
+def format_relative_time(iso_str: Optional[str]) -> str:
+    if not iso_str:
+        return "Never"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        diff = now - dt
+        total_seconds = max(0, int(diff.total_seconds()))
+        
+        if total_seconds < 60:
+            return f"{total_seconds}s ago"
+        minutes = total_seconds // 60
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        days = hours // 24
+        if days == 1:
+            return "yesterday"
+        if days < 30:
+            return f"{days}d ago"
+        return dt.strftime("%b %d, %Y")
+    except Exception:
+        return str(iso_str)[:19]
+
+def execute_update_cmd(cmd_list: List[str], timeout: int = 300) -> Tuple[int, str]:
+    """Executes an update command with timeout and environment."""
+    env = get_env_with_extra_paths()
+    try:
+        res = subprocess.run(
+            cmd_list,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+        return res.returncode, res.stdout or ""
+    except subprocess.TimeoutExpired:
+        return 124, f"Command timed out after {timeout}s"
+    except Exception as e:
+        return 1, str(e)
+
+def update_single_harness(
+    cfg: Dict[str, Any],
+    harness_state: Dict[str, Any],
+    quiet: bool = False,
+    dry_run: bool = False,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    key = cfg["key"]
+    name = cfg["name"]
+    now_iso = datetime.now(timezone.utc).isoformat()
+    
+    bin_path = find_executable(cfg["binary_candidates"])
+    if not bin_path:
+        if not quiet:
+            print(f"  {c('•', ANSI.GRAY)} {pad_str(c(name, ANSI.BOLD), 20)} {c('Not installed', ANSI.GRAY)} (skipped)")
+        harness_state["installed"] = False
+        harness_state["last_status"] = "not_installed"
+        harness_state["last_checked_at"] = now_iso
+        return harness_state, None
+
+    harness_state["installed"] = True
+    harness_state["binary_path"] = bin_path
+    
+    # Query version before update
+    v_before, _ = query_harness_version(cfg)
+    if not v_before:
+        v_before = harness_state.get("current_version") or "unknown"
+    
+    if dry_run:
+        if not quiet:
+            print(f"  {c('•', ANSI.BLUE)} {pad_str(c(name, ANSI.BOLD), 20)} {c('[DRY-RUN]', ANSI.YELLOW)} Current: {v_before}")
+        return harness_state, None
+
+    if not quiet:
+        print(f"  {c('⟳', ANSI.BLUE)} Updating {c(name, ANSI.BOLD)}...", end="", flush=True)
+
+    start_time = time.time()
+    
+    # Determine update command
+    update_cmd = list(cfg["update_cmd"])
+    first_tok = find_executable([update_cmd[0]])
+    if first_tok:
+        update_cmd[0] = first_tok
+    elif "fallback_update_cmd" in cfg:
+        fallback_tok = find_executable([cfg["fallback_update_cmd"][0]])
+        if fallback_tok:
+            update_cmd = [fallback_tok] + cfg["fallback_update_cmd"][1:]
+
+    ret_code, output = execute_update_cmd(update_cmd)
+    duration = time.time() - start_time
+    
+    # Query version after update
+    v_after, _ = query_harness_version(cfg)
+    if not v_after:
+        v_after = v_before
+
+    version_changed = (v_before != "unknown" and v_after != "unknown" and v_before != v_after)
+    change_event = None
+
+    harness_state["last_checked_at"] = now_iso
+    harness_state["last_duration_secs"] = round(duration, 2)
+
+    if "history" not in harness_state:
+        harness_state["history"] = []
+
+    if version_changed:
+        change_event = {
+            "key": key,
+            "name": name,
+            "timestamp": now_iso,
+            "from_version": v_before,
+            "to_version": v_after,
+            "duration_secs": round(duration, 2),
+            "status": "success" if ret_code == 0 else "updated_with_warning",
+        }
+        harness_state["previous_version"] = v_before
+        harness_state["current_version"] = v_after
+        harness_state["last_updated_at"] = now_iso
+        harness_state["last_version_change"] = {
+            "from_version": v_before,
+            "to_version": v_after,
+            "timestamp": now_iso,
+        }
+        harness_state["last_status"] = "updated"
+        harness_state["history"].insert(0, change_event)
+        harness_state["history"] = harness_state["history"][:50]
+        
+        if not quiet:
+            print(f"\r  {c('🎉', ANSI.GREEN)} {pad_str(c(name, ANSI.BOLD), 20)} {c('UPDATED', ANSI.GREEN, ANSI.BOLD)}: From version {c(v_before, ANSI.YELLOW)} to version {c(v_after, ANSI.GREEN, ANSI.BOLD)} ({duration:.1f}s)")
+    else:
+        harness_state["current_version"] = v_after
+        if "previous_version" not in harness_state or not harness_state["previous_version"]:
+            harness_state["previous_version"] = v_after
+            
+        if ret_code == 0:
+            harness_state["last_status"] = "up_to_date"
+            if not quiet:
+                print(f"\r  {c('✔', ANSI.GREEN)} {pad_str(c(name, ANSI.BOLD), 20)} {c('Up to date', ANSI.GREEN)} ({v_after}) ({duration:.1f}s)")
+        else:
+            harness_state["last_status"] = "error"
+            harness_state["last_error"] = output.splitlines()[-1] if output else "Update command failed"
+            if not quiet:
+                print(f"\r  {c('⚠️', ANSI.YELLOW)} {pad_str(c(name, ANSI.BOLD), 20)} {c('Update Warning', ANSI.YELLOW)} ({v_after}) - {harness_state['last_error']}")
+
+    return harness_state, change_event
+
+def run_all_updates(
+    target_keys: Optional[List[str]] = None,
+    quiet: bool = False,
+    dry_run: bool = False,
+) -> int:
+    with AtomicLock(LOCK_DIR):
+        state = load_state()
+        start_total = time.time()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        
+        configs_to_run = HARNESS_CONFIGS
+        if target_keys:
+            configs_to_run = [c for c in HARNESS_CONFIGS if c["key"] in target_keys]
+            if not configs_to_run:
+                print(c(f"Error: No matching harness for {target_keys}", ANSI.RED))
+                return 1
+
+        if not quiet:
+            local_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if has_gum():
+                banner = gum_style(
+                    "--border", "normal",
+                    "--border-foreground", "39",
+                    "--padding", "0 1",
+                    "--margin", "1 0",
+                    f"{gum_style('--foreground', '42', '--bold', text='UCA')} {gum_style('--foreground', '245', text='— Universal Coding Agent Harness Updater')}\n{gum_style('--foreground', '245', text='Started at: ' + local_time_str)}"
+                )
+                print(banner)
+            else:
+                print(f"\n{c('═' * 76, ANSI.BLUE)}")
+                print(f" {c('UCA', ANSI.BOLD, ANSI.BLUE)} — Universal Coding Agent Harness Updater")
+                print(f" {c('Started at:', ANSI.GRAY)} {local_time_str}")
+                print(f"{c('═' * 76, ANSI.BLUE)}\n")
+
+        any_updated = False
+        has_errors = False
+        
+        for cfg in configs_to_run:
+            key = cfg["key"]
+            h_state = state.get("harnesses", {}).get(key, {
+                "key": key,
+                "name": cfg["name"],
+                "installed": False,
+                "current_version": None,
+                "previous_version": None,
+                "last_checked_at": None,
+                "last_updated_at": None,
+                "last_status": None,
+                "last_version_change": None,
+                "history": [],
+            })
+            
+            updated_h_state, change_event = update_single_harness(cfg, h_state, quiet=quiet, dry_run=dry_run)
+            
+            if "harnesses" not in state:
+                state["harnesses"] = {}
+            state["harnesses"][key] = updated_h_state
+            
+            if change_event:
+                any_updated = True
+                state["most_recently_updated"] = change_event
+            if updated_h_state.get("last_status") == "error":
+                has_errors = True
+
+        total_duration = time.time() - start_total
+        state["last_run_at"] = now_iso
+        state["last_run_duration_secs"] = round(total_duration, 2)
+        state["last_run_status"] = "error" if has_errors else ("updated" if any_updated else "success")
+        
+        if not dry_run:
+            save_state(state)
+
+        if not quiet:
+            if has_gum():
+                status_txt = gum_style('--foreground', '42', '--bold', text='Completed')
+                print(f"\n{gum_style('--foreground', '245', text='Completed in: ' + f'{total_duration:.1f}s')} • {status_txt}")
+                if state.get("most_recently_updated"):
+                    mru = state["most_recently_updated"]
+                    mru_time = format_relative_time(mru.get("timestamp"))
+                    print(gum_style("--foreground", "39", "--bold", text=f"Most Recent Update: {mru['name']} (From version {mru['from_version']} to {mru['to_version']}, {mru_time})"))
+                print()
+            else:
+                print(f"\n{c('─' * 76, ANSI.GRAY)}")
+                print(f" {c('Completed in:', ANSI.GRAY)} {total_duration:.1f}s • Status: {c('Completed', ANSI.GREEN)}")
+                if state.get("most_recently_updated"):
+                    mru = state["most_recently_updated"]
+                    mru_time = format_relative_time(mru.get("timestamp"))
+                    print(f" {c('Most Recent Update:', ANSI.BLUE, ANSI.BOLD)} {mru['name']} (From version {mru['from_version']} to {mru['to_version']}, {mru_time})")
+                print(f"{c('═' * 76, ANSI.BLUE)}\n")
+
+        # Append to log file
+        try:
+            LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(LOG_FILE, "a", encoding="utf-8") as lf:
+                lf.write(f"[{now_iso}] uca run: duration={total_duration:.2f}s, updated={any_updated}, errors={has_errors}\n")
+        except Exception:
+            pass
+
+        return 1 if has_errors else 0
+
+def check_live_status() -> Dict[str, Any]:
+    """Probes current live versions and service state."""
+    state = load_state()
+    harnesses_data = {}
+    
+    for cfg in HARNESS_CONFIGS:
+        key = cfg["key"]
+        h_state = state.get("harnesses", {}).get(key, {})
+        v_live, _ = query_harness_version(cfg)
+        bin_path = find_executable(cfg["binary_candidates"])
+        
+        entry = dict(h_state)
+        entry["name"] = cfg["name"]
+        entry["installed"] = bool(bin_path)
+        entry["binary_path"] = bin_path
+        if v_live:
+            entry["current_version"] = v_live
+        harnesses_data[key] = entry
+        
+    return {
+        "state": state,
+        "harnesses": harnesses_data,
+        "service": get_service_status(),
+    }
+
+def get_service_status() -> Dict[str, Any]:
+    """Detects systemd user timer or launchd agent."""
+    res = {
+        "type": "none",
+        "active": False,
+        "schedule": "every 3 hours",
+        "next_run": "unknown",
+        "detail": "Not configured",
+    }
+    
+    # Check launchd (macOS)
+    if shutil.which("launchctl"):
+        res["type"] = "launchd"
+        plist_path = LAUNCHD_DIR / "com.jemanuel.uca.plist"
+        if plist_path.exists():
+            try:
+                r = subprocess.run(
+                    ["launchctl", "list"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5,
+                )
+                if "com.jemanuel.uca" in r.stdout:
+                    res["active"] = True
+                    detail_extra = ""
+                    for line in r.stdout.splitlines():
+                        if "com.jemanuel.uca" in line:
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                exit_code = parts[1]
+                                detail_extra = f", last exit: {exit_code}"
+                    res["detail"] = f"launchd background service active (every 3 hours / 10800s{detail_extra})"
+                else:
+                    res["detail"] = "launchd plist installed but not loaded"
+            except Exception as e:
+                res["detail"] = f"launchctl error: {e}"
+        else:
+            res["detail"] = "launchd agent not installed"
+        return res
+
+    # Check systemd (Linux)
+    if shutil.which("systemctl"):
+        res["type"] = "systemd"
+        try:
+            r = subprocess.run(
+                ["systemctl", "--user", "is-active", "uca.timer"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+            is_active = r.stdout.strip() == "active"
+            res["active"] = is_active
+            if is_active:
+                t = subprocess.run(
+                    ["systemctl", "--user", "list-timers", "uca.timer", "--no-legend"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5,
+                )
+                timer_out = t.stdout.strip()
+                if timer_out:
+                    parts = timer_out.split()
+                    if len(parts) >= 5:
+                        res["next_run"] = f"in {parts[2]} ({parts[0]} {parts[1]})"
+                res["detail"] = f"systemd timer active (every 3h, next: {res['next_run']})"
+            else:
+                res["detail"] = "systemd timer installed but inactive"
+        except Exception as e:
+            res["detail"] = f"systemd error: {e}"
+        return res
+
+    return res
+
+def print_status_dashboard(json_mode: bool = False) -> None:
+    data = check_live_status()
+    state = data["state"]
+    harnesses = data["harnesses"]
+    service = data["service"]
+
+    if json_mode:
+        print(json.dumps(data, indent=2))
+        return
+
+    use_gum_render = has_gum()
+
+    last_run_str = format_relative_time(state.get("last_run_at"))
+    last_run_full = ""
+    if state.get("last_run_at"):
+        try:
+            dt = datetime.fromisoformat(state["last_run_at"]).astimezone()
+            last_run_full = dt.strftime(" (%Y-%m-%d %H:%M:%S %Z)")
+        except Exception:
+            pass
+
+    # Find Most Recently Updated
+    mru = state.get("most_recently_updated")
+    if not mru:
+        candidate_changes = []
+        for cfg in HARNESS_CONFIGS:
+            h_info = harnesses.get(cfg["key"], {})
+            lvc = h_info.get("last_version_change")
+            if lvc and lvc.get("from_version") and lvc.get("to_version") and lvc["from_version"] != lvc["to_version"]:
+                candidate_changes.append({
+                    "name": cfg["name"],
+                    "from_version": lvc["from_version"],
+                    "to_version": lvc["to_version"],
+                    "timestamp": lvc.get("timestamp", ""),
+                })
+        if candidate_changes:
+            candidate_changes.sort(key=lambda x: x["timestamp"], reverse=True)
+            mru = candidate_changes[0]
+
+    if use_gum_render:
+        # Header Card with Gum
+        srv_badge = gum_style("--foreground", "42", "--bold", text="ACTIVE") if service.get("active") else gum_style("--foreground", "214", "--bold", text="INACTIVE")
+        header_l1 = f"{gum_style('--foreground', '42', '--bold', text='UCA STATUS')} {gum_style('--foreground', '245', text='— Universal Coding Agent Harness Dashboard')}"
+        header_l2 = f"{gum_style('--foreground', '245', text='Last Full Run:')} {gum_style('--bold', '--foreground', '252', text=last_run_str)}{gum_style('--foreground', '245', text=last_run_full)}"
+        header_l3 = f"{gum_style('--foreground', '245', text='Background Service:')} {srv_badge} {gum_style('--foreground', '245', text='• ' + service.get('detail', ''))}"
+        
+        banner = gum_style(
+            "--border", "rounded",
+            "--border-foreground", "39",
+            "--padding", "0 1",
+            "--margin", "1 0 0 0",
+            f"{header_l1}\n{header_l2}\n{header_l3}"
+        )
+        print(banner)
+
+        # Most Recently Updated Card
+        if mru:
+            mru_name = mru.get("name", mru.get("key", "Unknown"))
+            mru_from = mru.get("from_version", "?")
+            mru_to = mru.get("to_version", "?")
+            mru_time = format_relative_time(mru.get("timestamp"))
+            
+            mru_title = gum_style("--foreground", "214", "--bold", text="⭐ MOST RECENTLY UPDATED HARNESS")
+            mru_body = f"{gum_style('--foreground', '42', '--bold', text=mru_name)} {gum_style('--foreground', '245', text='• From version')} {gum_style('--foreground', '214', '--bold', text=mru_from)} {gum_style('--foreground', '245', text='to version')} {gum_style('--foreground', '42', '--bold', text=mru_to)} {gum_style('--foreground', '245', text=f'({mru_time})')}"
+            
+            mru_card = gum_style(
+                "--border", "normal",
+                "--border-foreground", "214",
+                "--padding", "0 1",
+                "--margin", "1 0 0 0",
+                f"{mru_title}\n{mru_body}"
+            )
+            print(mru_card)
+        else:
+            no_mru = gum_style("--foreground", "245", text="⭐ MOST RECENTLY UPDATED: No upgrades recorded yet (all harnesses up to date)")
+            print(f"\n {no_mru}")
+    else:
+        # ANSI Double-Line Header Card
+        term_width = 116
+        try:
+            term_width = max(116, min(140, shutil.get_terminal_size().columns))
+        except Exception:
+            pass
+
+        sep = "═" * term_width
+        subsep = "─" * term_width
+
+        print(f"\n{c(sep, ANSI.BLUE)}")
+        print(f" {c('UCA STATUS', ANSI.BOLD, ANSI.BLUE)} — Universal Coding Agent Harness Dashboard")
+        print(f" {c('Last Full Run:', ANSI.GRAY)} {c(last_run_str, ANSI.BOLD)}{c(last_run_full, ANSI.GRAY)}")
+        
+        srv_status_text = c("ACTIVE", ANSI.GREEN, ANSI.BOLD) if service.get("active") else c("INACTIVE / MANUAL", ANSI.YELLOW)
+        print(f" {c('Background Service:', ANSI.GRAY)} {srv_status_text} • {c(service.get('detail', ''), ANSI.GRAY)}")
+        print(f"{c(sep, ANSI.BLUE)}\n")
+
+        # Most Recently Updated Banner
+        if mru:
+            mru_name = mru.get("name", mru.get("key", "Unknown"))
+            mru_from = mru.get("from_version", "?")
+            mru_to = mru.get("to_version", "?")
+            mru_time = format_relative_time(mru.get("timestamp"))
+            
+            print(f" {c('⭐ MOST RECENTLY UPDATED HARNESS:', ANSI.YELLOW, ANSI.BOLD)}")
+            print(f"    {c(mru_name, ANSI.BOLD, ANSI.GREEN)}  {c('•', ANSI.GRAY)}  From version {c(mru_from, ANSI.YELLOW)} to version {c(mru_to, ANSI.GREEN, ANSI.BOLD)}  {c(f'({mru_time})', ANSI.GRAY)}\n")
+        else:
+            print(f" {c('⭐ MOST RECENTLY UPDATED:', ANSI.GRAY)} {c('No updates recorded yet (all harnesses currently up to date)', ANSI.GRAY)}\n")
+
+    # Table section
+    subsep_len = 116
+    subsep_str = "─" * subsep_len
+
+    print(f"\n {c('HARNESS BREAKDOWN', ANSI.BOLD)}")
+    print(f"{c(subsep_str, ANSI.GRAY)}")
+    
+    col_harness = 22
+    col_ver = 12
+    col_status = 16
+    col_change = 52
+    col_checked = 12
+
+    h_harness = pad_str("Harness", col_harness)
+    h_ver = pad_str("Version", col_ver)
+    h_status = pad_str("Status", col_status)
+    h_change = pad_str("Version Changes", col_change)
+    h_checked = pad_str("Checked", col_checked)
+    
+    print(c(f" {h_harness}{h_ver}{h_status}{h_change}{h_checked}", ANSI.BOLD, ANSI.BLUE))
+    print(f"{c(subsep_str, ANSI.GRAY)}")
+
+    for cfg in HARNESS_CONFIGS:
+        key = cfg["key"]
+        info = harnesses.get(key, {})
+        name = cfg["name"]
+        installed = info.get("installed", False)
+        curr_ver = info.get("current_version") or "-"
+        last_check = format_relative_time(info.get("last_checked_at"))
+        
+        if not installed:
+            status_badge = c("Not Found", ANSI.GRAY)
+            ver_badge = c("-", ANSI.GRAY)
+            change_text = c("Binary not installed in PATH", ANSI.GRAY)
+        else:
+            ver_badge = c(curr_ver, ANSI.BOLD, ANSI.WHITE)
+            last_status = info.get("last_status", "up_to_date")
+            
+            if last_status == "updated":
+                status_badge = c("✔ Updated", ANSI.GREEN, ANSI.BOLD)
+            elif last_status == "error":
+                status_badge = c("⚠️ Error", ANSI.RED)
+            else:
+                status_badge = c("✔ Up to date", ANSI.GREEN)
+                
+            lvc = info.get("last_version_change")
+            if lvc and lvc.get("from_version") and lvc.get("to_version"):
+                from_v = lvc["from_version"]
+                to_v = lvc["to_version"]
+                t_ago = format_relative_time(lvc.get("timestamp"))
+                if from_v != to_v:
+                    change_text = f"From version {c(from_v, ANSI.YELLOW)} to version {c(to_v, ANSI.GREEN, ANSI.BOLD)} {c(f'({t_ago})', ANSI.GRAY)}"
+                else:
+                    change_text = f"Up to date at {curr_ver} {c(f'({t_ago})', ANSI.GRAY)}"
+            else:
+                change_text = f"Up to date at {curr_ver}"
+
+        p_name = pad_str(name, col_harness)
+        p_ver = pad_str(ver_badge, col_ver)
+        p_status = pad_str(status_badge, col_status)
+        p_change = pad_str(change_text, col_change)
+        p_checked = pad_str(last_check, col_checked)
+
+        print(f" {p_name}{p_ver}{p_status}{p_change}{p_checked}")
+
+    print(f"{c(subsep_str, ANSI.GRAY)}\n")
+
+    # Version Change History
+    all_history = []
+    for cfg in HARNESS_CONFIGS:
+        key = cfg["key"]
+        info = harnesses.get(key, {})
+        for h in info.get("history", []):
+            all_history.append(h)
+            
+    all_history.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    
+    if all_history:
+        print(f" {c('📜 RECENT VERSION CHANGE HISTORY', ANSI.BOLD)}")
+        print(f"{c(subsep_str, ANSI.GRAY)}")
+        for item in all_history[:8]:
+            t_str = item.get("timestamp", "")
+            try:
+                dt = datetime.fromisoformat(t_str).astimezone()
+                time_fmt = dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                time_fmt = str(t_str)[:16]
+            h_name = item.get("name", item.get("key", "Unknown"))
+            from_v = item.get("from_version", "?")
+            to_v = item.get("to_version", "?")
+            print(f"  {c('•', ANSI.BLUE)} {c(time_fmt, ANSI.GRAY)}  {c(pad_str(h_name, 18), ANSI.BOLD)} From version {c(from_v, ANSI.YELLOW)} to version {c(to_v, ANSI.GREEN, ANSI.BOLD)}")
+        print(f"{c(subsep_str, ANSI.GRAY)}\n")
+
+    # Footer
+    if use_gum_render:
+        footer = gum_style(
+            "--foreground", "245",
+            "--italic",
+            text="Commands: uca (update all) • ucas (status) • uca <harness> (update one) • uca doctor (health) • uca service install"
+        )
+        print(f" {footer}\n")
+    else:
+        print(f" {c('Commands:', ANSI.GRAY)} {c('uca', ANSI.BOLD)} (update all) • {c('ucas', ANSI.BOLD)} (status) • {c('uca <harness>', ANSI.BOLD)} (update one) • {c('uca doctor', ANSI.BOLD)} (health) • {c('uca service install', ANSI.BOLD)}")
+        print(f"{c('═' * subsep_len, ANSI.BLUE)}\n")
+
+def run_doctor() -> None:
+    """Preflight checks & diagnostics matching installer-workmanship patterns."""
+    print(f"\n{c('═' * 76, ANSI.BLUE)}")
+    print(f" {c('UCA DOCTOR', ANSI.BOLD, ANSI.BLUE)} — Harness & Environment Diagnostics")
+    print(f"{c('═' * 76, ANSI.BLUE)}\n")
+
+    # 1. Check Python version
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    print(f"  {c('✔', ANSI.GREEN)} Python runtime: {c(py_ver, ANSI.BOLD)} ({sys.executable})")
+
+    # 2. Check Gum binary
+    gum_bin = shutil.which("gum")
+    if gum_bin:
+        gum_v = subprocess.run([gum_bin, "--version"], capture_output=True, text=True).stdout.strip()
+        print(f"  {c('✔', ANSI.GREEN)} Charmbracelet Gum: {c('Found', ANSI.GREEN)} ({gum_v})")
+    else:
+        print(f"  {c('•', ANSI.GRAY)} Charmbracelet Gum: {c('Not in PATH (ANSI fallback active)', ANSI.GRAY)}")
+
+    # 3. Check State directory and file
+    print(f"  {c('✔', ANSI.GREEN)} State storage: {STATE_DIR} (writable={os.access(STATE_DIR, os.W_OK)})")
+
+    # 4. Check Background Service
+    srv = get_service_status()
+    if srv["active"]:
+        print(f"  {c('✔', ANSI.GREEN)} 3-Hour Auto-Updater: {c(srv['detail'], ANSI.GREEN, ANSI.BOLD)}")
+    else:
+        print(f"  {c('⚠️', ANSI.YELLOW)} 3-Hour Auto-Updater: {c(srv['detail'], ANSI.YELLOW)} (run `uca service install` to enable)")
+
+    # 5. Check each harness
+    print(f"\n  {c('Harness Integrity Checks:', ANSI.BOLD)}")
+    for cfg in HARNESS_CONFIGS:
+        name = cfg["name"]
+        bin_path = find_executable(cfg["binary_candidates"])
+        v, _ = query_harness_version(cfg)
+        if bin_path:
+            print(f"    {c('✔', ANSI.GREEN)} {pad_str(name, 20)} {c(bin_path, ANSI.GRAY):<40} Version: {c(v or 'unknown', ANSI.BOLD)}")
+        else:
+            print(f"    {c('•', ANSI.GRAY)} {pad_str(name, 20)} {c('Binary not installed', ANSI.GRAY)}")
+
+    print(f"\n{c('═' * 76, ANSI.BLUE)}\n")
+
+def install_systemd_service() -> bool:
+    """Installs and enables systemd user service and timer (every 3 hours)."""
+    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    
+    service_content = f"""[Unit]
+Description=Universal Coding Agent Harness Auto-Updater (UCA)
+Documentation=https://github.com/Dicklesworthstone
+After=network-online.target default.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={Path.home()}/.local/bin/uca --quiet
+TimeoutStartSec=600
+Restart=no
+StandardOutput=journal
+StandardError=journal
+Environment=HOME={Path.home()}
+Environment=PATH={Path.home()}/.local/bin:{Path.home()}/.bun/bin:{Path.home()}/.grok/bin:{Path.home()}/.cargo/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+"""
+
+    timer_content = """[Unit]
+Description=Universal Coding Agent Harness Auto-Updater Timer (every 3 hours)
+Documentation=https://github.com/Dicklesworthstone
+
+[Timer]
+# Run every 3 hours at the top of the hour (00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00, 21:00)
+OnCalendar=*-*-* 00,03,06,09,12,15,18,21:00:00
+# Run 5 minutes after boot if missed
+OnBootSec=5min
+# Catch up if machine was offline
+Persistent=true
+# 3-minute random jitter to avoid thundering herd across fleet
+RandomizedDelaySec=180
+
+[Install]
+WantedBy=timers.target
+"""
+
+    service_file = SYSTEMD_USER_DIR / "uca.service"
+    timer_file = SYSTEMD_USER_DIR / "uca.timer"
+
+    with open(service_file, "w", encoding="utf-8") as f:
+        f.write(service_content)
+    with open(timer_file, "w", encoding="utf-8") as f:
+        f.write(timer_content)
+
+    print(f"{c('✔', ANSI.GREEN)} Wrote {service_file}")
+    print(f"{c('✔', ANSI.GREEN)} Wrote {timer_file}")
+
+    try:
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "--user", "enable", "--now", "uca.timer"], check=True)
+        print(f"{c('✔', ANSI.GREEN)} Enabled and started {c('uca.timer', ANSI.BOLD)} (runs every 3 hours)")
+        return True
+    except Exception as e:
+        print(f"{c('⚠️', ANSI.YELLOW)} systemctl command failed: {e}")
+        return False
+
+def install_launchd_service() -> bool:
+    """Installs and enables macOS launchd agent (every 3 hours = 10800s)."""
+    LAUNCHD_DIR.mkdir(parents=True, exist_ok=True)
+    plist_path = LAUNCHD_DIR / "com.jemanuel.uca.plist"
+    
+    path_env = f"{Path.home()}/.local/bin:{Path.home()}/.bun/bin:{Path.home()}/.grok/bin:{Path.home()}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    
+    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jemanuel.uca</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{Path.home()}/.local/bin/uca</string>
+        <string>--quiet</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>10800</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{STATE_DIR}/uca.log</string>
+    <key>StandardErrorPath</key>
+    <string>{STATE_DIR}/uca-error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{path_env}</string>
+        <key>HOME</key>
+        <string>{Path.home()}</string>
+    </dict>
+</dict>
+</plist>
+"""
+    with open(plist_path, "w", encoding="utf-8") as f:
+        f.write(plist_content)
+        
+    print(f"{c('✔', ANSI.GREEN)} Wrote {plist_path}")
+    
+    # Also write systemd units in ~/.config/systemd/user/ so they exist if synced
+    try:
+        SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+        service_file = SYSTEMD_USER_DIR / "uca.service"
+        timer_file = SYSTEMD_USER_DIR / "uca.timer"
+        service_content = f"""[Unit]
+Description=Universal Coding Agent Harness Auto-Updater (UCA)
+Documentation=https://github.com/Dicklesworthstone
+After=network-online.target default.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/uca --quiet
+TimeoutStartSec=600
+Restart=no
+StandardOutput=journal
+StandardError=journal
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.grok/bin:%h/.cargo/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+"""
+        timer_content = """[Unit]
+Description=Universal Coding Agent Harness Auto-Updater Timer (every 3 hours)
+Documentation=https://github.com/Dicklesworthstone
+
+[Timer]
+OnCalendar=*-*-* 00,03,06,09,12,15,18,21:00:00
+OnBootSec=5min
+Persistent=true
+RandomizedDelaySec=180
+
+[Install]
+WantedBy=timers.target
+"""
+        with open(service_file, "w", encoding="utf-8") as f:
+            f.write(service_content)
+        with open(timer_file, "w", encoding="utf-8") as f:
+            f.write(timer_content)
+        print(f"{c('✔', ANSI.GREEN)} Wrote {service_file} & {timer_file} (systemd user units)")
+    except Exception:
+        pass
+
+    try:
+        subprocess.run(["launchctl", "unload", str(plist_path)], stderr=subprocess.DEVNULL)
+        subprocess.run(["launchctl", "load", "-w", str(plist_path)], check=True)
+        print(f"{c('✔', ANSI.GREEN)} Loaded launchd agent {c('com.jemanuel.uca', ANSI.BOLD)} (runs every 3 hours)")
+        return True
+    except Exception as e:
+        print(f"{c('⚠️', ANSI.YELLOW)} launchctl command failed: {e}")
+        return False
+
+def install_service() -> None:
+    print(f"\n{c('Setting up UCA 3-hour background auto-updater...', ANSI.BLUE, ANSI.BOLD)}")
+    if shutil.which("systemctl"):
+        install_systemd_service()
+    elif shutil.which("launchctl"):
+        install_launchd_service()
+    else:
+        print(c("Neither systemd nor launchd detected on this system.", ANSI.YELLOW))
+
+def main() -> None:
+    global NO_GUM, FORCE_COLOR
+    prog_name = os.path.basename(sys.argv[0])
+    raw_args = sys.argv[1:]
+
+    if "--no-gum" in raw_args:
+        NO_GUM = True
+        raw_args = [a for a in raw_args if a != "--no-gum"]
+
+    if prog_name == "ucas" or (raw_args and raw_args[0] in ["status", "s", "st", "-s", "--status"]):
+        if "-h" in raw_args or "--help" in raw_args:
+            print("""UCAS — Universal Coding Agent Harness Dashboard
+
+Usage:
+  ucas                Show status dashboard, recent version changes, and schedule
+  ucas --json         Output status in machine-readable JSON format
+  ucas --no-gum       Disable gum styling and use ANSI fallback
+  ucas -h, --help     Show this help message
+""")
+            return
+        json_mode = "--json" in raw_args
+        print_status_dashboard(json_mode=json_mode)
+        return
+
+    # Check for doctor command
+    if raw_args and raw_args[0] in ["doctor", "doc", "--doctor", "--verify"]:
+        run_doctor()
+        return
+
+    # Check for service command
+    if raw_args and raw_args[0] in ["service", "--service", "--install-service"]:
+        action = "install"
+        if len(raw_args) > 1 and raw_args[1] in ["status", "install", "enable", "disable"]:
+            action = raw_args[1]
+        elif raw_args[0] == "--install-service":
+            action = "install"
+            
+        if action in ["install", "enable"]:
+            install_service()
+        else:
+            status_data = get_service_status()
+            print(f"Service Type: {status_data['type']}")
+            print(f"Active: {status_data['active']}")
+            print(f"Detail: {status_data['detail']}")
+        return
+
+    # Check for check command
+    if raw_args and raw_args[0] in ["check", "--check"]:
+        print_status_dashboard(json_mode="--json" in raw_args)
+        return
+
+    # Parse flags
+    quiet = "-q" in raw_args or "--quiet" in raw_args
+    dry_run = "--dry-run" in raw_args
+    help_flag = "-h" in raw_args or "--help" in raw_args
+
+    if help_flag:
+        print("""UCA — Universal Coding Agent Harness Updater & Version Tracker
+
+Usage:
+  uca                 Update all agent harnesses (claude, codex, agy, grok, omp)
+  ucas                Show status breakdown, version changes, and schedule
+  uca status          Show status dashboard (alias for ucas)
+  uca <harness>       Update specific harness (e.g. 'uca omp', 'uca claude')
+  uca doctor          Run preflight diagnostics & self-test
+  uca service install Install 3-hour background auto-updater service
+  uca service status  Show background service status
+  uca check           Probe versions without running updates
+
+Options:
+  -q, --quiet         Minimal output (for automated / cron / service runs)
+  --dry-run           Check versions without applying updates
+  --no-gum            Disable gum styling and use ANSI fallback
+  --json              Output status in JSON format
+  -h, --help          Show this help message
+""")
+        return
+
+    # Filter out flags to find target harnesses
+    known_harness_keys = {cfg["key"] for cfg in HARNESS_CONFIGS}
+    targets = []
+    for arg in raw_args:
+        if arg.startswith("-"):
+            continue
+        if arg.lower() in ["update", "run"]:
+            continue
+        if arg.lower() in known_harness_keys or arg.lower() in ["all"]:
+            if arg.lower() != "all":
+                targets.append(arg.lower())
+        else:
+            # Check if partial match
+            matched = False
+            for k in known_harness_keys:
+                if k.startswith(arg.lower()):
+                    targets.append(k)
+                    matched = True
+                    break
+            if not matched:
+                print(c(f"Unknown harness or command: '{arg}'. Available: {', '.join(sorted(known_harness_keys))}", ANSI.YELLOW))
+
+    code = run_all_updates(
+        target_keys=targets if targets else None,
+        quiet=quiet,
+        dry_run=dry_run,
+    )
+    sys.exit(code)
+
+if __name__ == "__main__":
+    main()

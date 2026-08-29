@@ -29,6 +29,7 @@ Practical guides for AI coding agents, terminal customization, and development t
 | [Zellij Scroll Wheel Fix](#zellij-scroll-wheel-fix) | Mouse wheel triggers atuin instead of scrollback in Zellij over SSH | 10 min |
 | [Encrypted GitHub Issues](#encrypted-github-issues) | Need to receive sensitive security reports in public repos | 2 min |
 | [Qwen3.8-27B on Dual 4090s](#qwen38-27b-uncensored-on-dual-rtx-4090s) | Want a strong local uncensored coding/research model served by vLLM and wired into omp | 15 min + downloads |
+| [Universal Agent Harness Updater (UCA)](#universal-coding-agent-harness-updater) | Managing 5+ AI coding agent harnesses manually is tedious and loses upgrade telemetry | 1 min |
 
 ---
 
@@ -515,6 +516,29 @@ Many high-end workstations (Threadripper PRO, EPYC) have **unused 10GbE ports**.
 ---
 
 ## Development Tools
+
+### Universal Coding Agent Harness Updater
+
+A unified management and telemetry system for AI coding agent CLIs (**Claude Code**, **OpenAI Codex**, **Google Antigravity**, **xAI Grok**, and **OMP**). Includes automatic 3-hour background scheduling, an interactive Charmbracelet Gum dashboard (`ucas`), upgrade history tracking (`"From version xyz to version abc"`), atomic locking, and health diagnostics (`uca doctor`).
+
+**Quick Install:**
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/install-uca.sh?$(date +%s)" | bash
+```
+
+**Commands:**
+
+```bash
+uca         # Update all 5 harnesses sequentially
+ucas        # Open status dashboard with version transitions
+uca omp     # Update only OMP (or claude, codex, agy, grok)
+uca doctor  # Run preflight diagnostics and health check
+```
+
+**[Full guide →](UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md)**
+
+---
 
 ### Claude Code Native Install Fix
 

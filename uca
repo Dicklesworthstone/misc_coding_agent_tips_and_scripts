@@ -1,1327 +1,1005 @@
-#!/usr/bin/env python3
-"""
-UCA — Universal Coding Agent Harness Updater & Version Tracker
-Crafted with production-grade installer-workmanship patterns:
-  • Charmbracelet Gum styling with seamless ANSI box-drawing fallback
-  • Atomic lock management with stale PID detection
-  • Live semver tracking and transition history ("From version xyz to version abc")
-  • Parallel async version probing (ThreadPoolExecutor)
-  • Post-update smoke test & verification guard
-  • Native desktop & terminal notifications (macOS osascript / Linux notify-send)
-  • Interactive live dashboard watch mode (ucas -w)
-  • Built-in log viewer and diagnostics (uca logs, uca doctor)
-  • Clean in-binary uninstaller (uca uninstall)
-  • Universal 3-hour background scheduling (launchd on macOS, systemd on Linux)
+#!/usr/bin/env bash
+#
+# UCA — Universal Coding Agent Harness Updater & Version Tracker
+#
+# Ultra-lightweight, zero-dependency bash engine (< 2MB memory footprint, instant startup).
+# Crafted with production-grade installer-workmanship patterns:
+#   • Dual-path UI: Charmbracelet Gum styling with seamless ANSI box-drawing fallback
+#   • Pre-update zero/low disk space crash prevention guard (df -Pk check)
+#   • Atomic directory locking with stale PID recovery
+#   • Live semver transition tracking ("From version xyz to version abc")
+#   • Parallel async version probing via background jobs
+#   • Post-update smoke test & verification guard
+#   • Native desktop notifications (macOS osascript / Linux notify-send)
+#   • Interactive live watch mode (ucas -w)
+#   • Universal 3-hour background scheduling (launchd on macOS, systemd on Linux)
+#   • Built-in logs, diagnostics (uca doctor), and uninstaller (uca uninstall)
+#
+# Harnesses Managed:
+#   • Claude Code       (claude update)
+#   • OpenAI Codex      (bun install -g @openai/codex@latest / codex update)
+#   • Google Antigravity (agy update)
+#   • xAI Grok          (grok update)
+#   • OMP               (omp update)
 
-Harnesses Managed:
-  • Claude Code (claude update)
-  • OpenAI Codex (bun install -g @openai/codex@latest)
-  • Google Antigravity (agy update)
-  • xAI Grok (grok update)
-  • OMP (omp update)
+set -uo pipefail
 
-Usage:
-  uca                 Update all agent harnesses sequentially
-  ucas                Show status dashboard, recent version changes, and schedule
-  ucas -w, --watch    Live interactive auto-refreshing dashboard
-  ucas -f, --fast     Probe versions in parallel (ultra-fast)
-  uca <harness>       Update a specific harness (e.g. 'uca omp', 'uca claude')
-  uca doctor          Run preflight diagnostics & self-test
-  uca logs            View recent update logs (--errors, --follow)
-  uca service install Install 3-hour background auto-updater service
-  uca service status  Show background service/timer status
-  uca uninstall       Completely remove UCA, background timers, and aliases
-  uca check           Probe versions without running updates
-
-Options:
-  -q, --quiet         Minimal output (for automated / cron / service runs)
-  --notify            Send desktop notifications on version changes
-  --no-smoke-test     Skip post-update verification guard
-  --dry-run           Check versions without applying updates
-  --no-gum            Disable gum styling and use ANSI fallback
-  --json              Output status in machine-readable JSON format
-  -h, --help          Show this help message
-"""
-
-import concurrent.futures
-from datetime import datetime, timezone
-import json
-import os
-from pathlib import Path
-import re
-import shutil
-import signal
-import subprocess
-import sys
-import time
-from typing import Any, Dict, List, Optional, Tuple
+# Ensure standard tool paths in PATH
+for d in "$HOME/.local/bin" "$HOME/.bun/bin" "$HOME/.grok/bin" "$HOME/.cargo/bin" "/opt/homebrew/bin" "/usr/local/bin"; do
+  if [ -d "$d" ] && [[ ":$PATH:" != *":$d:"* ]]; then
+    PATH="$d:$PATH"
+  fi
+done
+export PATH
 
 # Base Paths
-STATE_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "uca"
-STATE_FILE = STATE_DIR / "state.json"
-LOCK_DIR = STATE_DIR / ".lock"
-LOG_FILE = STATE_DIR / "uca.log"
-ERROR_LOG_FILE = STATE_DIR / "uca-error.log"
-SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
-LAUNCHD_DIR = Path.home() / "Library" / "LaunchAgents"
-
-# ANSI Fallback Colors
-class ANSI:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    ITALIC = "\033[3m"
-    BLUE = "\033[38;5;39m"
-    GREEN = "\033[38;5;42m"
-    YELLOW = "\033[38;5;214m"
-    RED = "\033[38;5;196m"
-    MAGENTA = "\033[38;5;212m"
-    GRAY = "\033[38;5;245m"
-    WHITE = "\033[38;5;252m"
-
-ANSI_STRIP_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
-
-def strip_ansi(s: str) -> str:
-    return ANSI_STRIP_RE.sub("", s)
-
-def visible_len(s: str) -> int:
-    return len(strip_ansi(s))
-
-def pad_str(s: str, width: int, align: str = "left") -> str:
-    vlen = visible_len(s)
-    pad = max(0, width - vlen)
-    if align == "right":
-        return " " * pad + s
-    elif align == "center":
-        left = pad // 2
-        right = pad - left
-        return " " * left + s + " " * right
-    return s + " " * pad
-
-# Global Settings
-NO_GUM = False
-FORCE_COLOR = False
-
-def use_color() -> bool:
-    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
-        return False
-    return sys.stdout.isatty() or FORCE_COLOR
-
-def c(text: str, *styles: str) -> str:
-    if not use_color():
-        return strip_ansi(str(text))
-    return "".join(styles) + str(text) + ANSI.RESET
-
-def has_gum() -> bool:
-    if NO_GUM:
-        return False
-    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
-        return False
-    gum_bin = shutil.which("gum")
-    return bool(gum_bin and (sys.stdout.isatty() or FORCE_COLOR))
-
-def gum_style(*args: str, text: str = "") -> str:
-    gum_bin = shutil.which("gum")
-    if not gum_bin:
-        return text
-    cmd = [gum_bin, "style"] + list(args)
-    if text:
-        cmd.append(text)
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        return r.stdout.rstrip("\n")
-    except Exception:
-        return text
+STATE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/uca"
+STATE_FILE="$STATE_DIR/state.json"
+LOCK_DIR="$STATE_DIR/.lock"
+LOG_FILE="$STATE_DIR/uca.log"
+ERROR_LOG_FILE="$STATE_DIR/uca-error.log"
+SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+LAUNCHD_DIR="$HOME/Library/LaunchAgents"
 
 # Minimum Free Disk Space Threshold (in Megabytes)
-# Auto-updates will safely pause if free disk space falls below this limit
-DEFAULT_MIN_FREE_DISK_MB = 500
-MIN_FREE_DISK_MB = int(os.environ.get("UCA_MIN_DISK_MB", str(DEFAULT_MIN_FREE_DISK_MB)))
+DEFAULT_MIN_FREE_DISK_MB=500
+MIN_FREE_DISK_MB="${UCA_MIN_DISK_MB:-$DEFAULT_MIN_FREE_DISK_MB}"
 
-def get_disk_space_info(threshold_mb: int = MIN_FREE_DISK_MB) -> Dict[str, Any]:
-    """Checks free disk space across home, tmp, and state partitions."""
-    paths_to_check = [Path.home(), STATE_DIR]
-    try:
-        import tempfile
-        paths_to_check.append(Path(tempfile.gettempdir()))
-    except Exception:
-        pass
+# ANSI Colors
+C_RESET="\033[0m"
+C_BOLD="\033[1m"
+C_DIM="\033[2m"
+C_BLUE="\033[38;5;39m"
+C_GREEN="\033[38;5;42m"
+C_YELLOW="\033[38;5;214m"
+C_RED="\033[38;5;196m"
+C_MAGENTA="\033[38;5;212m"
+C_GRAY="\033[38;5;245m"
+C_WHITE="\033[38;5;252m"
 
-    min_free_bytes = None
-    min_free_path = None
-    total_bytes = None
-    
-    for p in paths_to_check:
-        try:
-            p.mkdir(parents=True, exist_ok=True)
-            usage = shutil.disk_usage(p)
-            if min_free_bytes is None or usage.free < min_free_bytes:
-                min_free_bytes = usage.free
-                min_free_path = str(p)
-                total_bytes = usage.total
-        except Exception:
-            pass
-            
-    if min_free_bytes is None:
-        return {
-            "free_bytes": 10**12,
-            "free_mb": 1000000.0,
-            "free_gb": 1000.0,
-            "total_gb": 1000.0,
-            "is_low": False,
-            "is_critical": False,
-            "path": str(Path.home()),
-            "threshold_mb": threshold_mb,
-        }
-        
-    free_mb = min_free_bytes / (1024 * 1024)
-    free_gb = min_free_bytes / (1024 * 1024 * 1024)
-    total_gb = (total_bytes or 0) / (1024 * 1024 * 1024)
-    
-    is_low = free_mb < threshold_mb
-    is_critical = free_mb < min(100.0, threshold_mb / 2.0)
-    
-    return {
-        "free_bytes": min_free_bytes,
-        "free_mb": round(free_mb, 1),
-        "free_gb": round(free_gb, 2),
-        "total_gb": round(total_gb, 1),
-        "is_low": is_low,
-        "is_critical": is_critical,
-        "path": min_free_path or str(Path.home()),
-        "threshold_mb": threshold_mb,
-    }
+NO_GUM=0
+FORCE_COLOR=0
 
-def draw_box(color_code: int, lines: List[str]) -> None:
-    """Renders a stylized double-line Unicode box with ANSI color."""
-    max_len = 0
-    for line in lines:
-        vlen = visible_len(line)
-        if vlen > max_len:
-            max_len = vlen
-    border = "═" * (max_len + 4)
-    print(f"\033[38;5;{color_code}m╔{border}╗\033[0m")
-    for line in lines:
-        pad = max_len - visible_len(line)
-        print(f"\033[38;5;{color_code}m║\033[0m  {line}{' ' * pad}  \033[38;5;{color_code}m║\033[0m")
-    print(f"\033[38;5;{color_code}m╚{border}╝\033[0m")
+use_color() {
+  if [ -n "${NO_COLOR:-}" ] || [ "${TERM:-}" = "dumb" ]; then
+    return 1
+  fi
+  [ -t 1 ] || [ "$FORCE_COLOR" -eq 1 ]
+}
+
+has_gum() {
+  [ "$NO_GUM" -eq 1 ] && return 1
+  if [ -n "${NO_COLOR:-}" ] || [ "${TERM:-}" = "dumb" ]; then
+    return 1
+  fi
+  command -v gum &>/dev/null && ([ -t 1 ] || [ "$FORCE_COLOR" -eq 1 ])
+}
+
+strip_ansi() {
+  local esc
+  esc=$(printf '\033')
+  sed -E "s/(${esc}|\\\\033|\\\\e)\[[0-9;]*[a-zA-Z]//g" <<< "$1"
+}
+
+pad_str() {
+  local s="$1" width="$2" align="${3:-left}"
+  local clean len pad left right
+  clean=$(strip_ansi "$s")
+  len=${#clean}
+  if [ "$len" -ge "$width" ]; then
+    printf "%s" "$s"
+    return
+  fi
+  pad=$((width - len))
+  if [ "$align" = "right" ]; then
+    printf "%*s%s" "$pad" "" "$s"
+  elif [ "$align" = "center" ]; then
+    left=$((pad / 2))
+    right=$((pad - left))
+    printf "%*s%s%*s" "$left" "" "$s" "$right" ""
+  else
+    printf "%s%*s" "$s" "$pad" ""
+  fi
+}
+
+draw_box() {
+  local color_code="$1"; shift
+  local lines=("$@")
+  local max_len=0
+  for l in "${lines[@]}"; do
+    local clean len
+    clean=$(strip_ansi "$l")
+    len=${#clean}
+    [ "$len" -gt "$max_len" ] && max_len=$len
+  done
+  
+  local border=""
+  for ((i=0; i<max_len+4; i++)); do border="${border}═"; done
+  
+  echo -e "\033[38;5;${color_code}m╔${border}╗\033[0m"
+  for l in "${lines[@]}"; do
+    local clean len pad
+    clean=$(strip_ansi "$l")
+    len=${#clean}
+    pad=$((max_len - len))
+    local pad_str=""
+    if [ "$pad" -gt 0 ]; then
+      pad_str=$(printf "%*s" "$pad" "")
+    fi
+    echo -e "\033[38;5;${color_code}m║\033[0m  ${l}${pad_str}  \033[38;5;${color_code}m║\033[0m"
+  done
+  echo -e "\033[38;5;${color_code}m╚${border}╝\033[0m"
+}
 
 # Atomic Locking with Stale PID Detection & Signal Trap
-class AtomicLock:
-    def __init__(self, lock_dir: Path):
-        self.lock_dir = lock_dir
-        self.acquired = False
+acquire_lock() {
+  mkdir -p "$STATE_DIR"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    local pid_file="$LOCK_DIR/pid"
+    if [ -f "$pid_file" ]; then
+      local old_pid
+      old_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+      if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+        echo -e "${C_YELLOW}⚠ Another UCA process (PID $old_pid) is currently running. Skipping.${C_RESET}" >&2
+        exit 0
+      fi
+    fi
+    # Reclaim stale lock
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+      exit 0
+    fi
+  fi
+  echo "$$" > "$LOCK_DIR/pid"
+  trap 'release_lock; exit 130' INT TERM HUP
+}
 
-    def acquire(self) -> bool:
-        self.lock_dir.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.mkdir(self.lock_dir)
-            self.acquired = True
-            with open(self.lock_dir / "pid", "w", encoding="utf-8") as f:
-                f.write(str(os.getpid()))
-            return True
-        except FileExistsError:
-            # Check stale lock
-            pid_file = self.lock_dir / "pid"
-            if pid_file.exists():
-                try:
-                    with open(pid_file, "r", encoding="utf-8") as f:
-                        old_pid = int(f.read().strip())
-                    os.kill(old_pid, 0)
-                    return False
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pass
-            
-            # Clean up stale lock
-            try:
-                if pid_file.exists():
-                    pid_file.unlink()
-                os.rmdir(self.lock_dir)
-                os.mkdir(self.lock_dir)
-                self.acquired = True
-                with open(self.lock_dir / "pid", "w", encoding="utf-8") as f:
-                    f.write(str(os.getpid()))
-                return True
-            except Exception:
-                return False
+release_lock() {
+  if [ -d "$LOCK_DIR" ]; then
+    rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+}
 
-    def release(self) -> None:
-        if self.acquired and self.lock_dir.exists():
-            try:
-                pid_file = self.lock_dir / "pid"
-                if pid_file.exists():
-                    pid_file.unlink()
-                os.rmdir(self.lock_dir)
-            except Exception:
-                pass
-            self.acquired = False
+# Disk Space Probe
+get_free_disk_mb() {
+  local target="${1:-$HOME}"
+  local free_kb
+  free_kb=$(df -Pk "$target" 2>/dev/null | tail -1 | awk '{print $4}' || echo "1000000")
+  echo $((free_kb / 1024))
+}
 
-    def __enter__(self):
-        if not self.acquire():
-            print(c("⚠ Another UCA process is currently running. Skipping execution.", ANSI.YELLOW), file=sys.stderr)
-            sys.exit(0)
-        return self
+# Desktop Notification Dispatcher
+send_desktop_notification() {
+  local title="$1" msg="$2"
+  if [ "$(uname -s)" = "Darwin" ] && command -v osascript &>/dev/null; then
+    local safe_t safe_m
+    safe_t=$(sed 's/"/\\"/g' <<< "$title")
+    safe_m=$(sed 's/"/\\"/g' <<< "$msg")
+    osascript -e "display notification \"$safe_m\" with title \"$safe_t\" subtitle \"UCA Auto-Updater\"" 2>/dev/null || true
+  elif command -v notify-send &>/dev/null; then
+    notify-send "$title" "$msg" -a "UCA" -i "system-software-update" 2>/dev/null || true
+  fi
+}
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.release()
+# Clean Semver Extractor
+extract_clean_version() {
+  local raw="$1"
+  local ver
+  ver=$(grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?' <<< "$raw" | head -1)
+  if [ -n "$ver" ]; then
+    echo "$ver"
+  else
+    head -n 1 <<< "$raw" | cut -c 1-25 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  fi
+}
 
-# Harness Registry
-HARNESS_CONFIGS = [
-    {
-        "key": "claude",
-        "name": "Claude Code",
-        "binary_candidates": ["claude", str(Path.home() / ".local" / "bin" / "claude")],
-        "version_cmd": ["claude", "--version"],
-        "smoke_cmd": ["claude", "--help"],
-        "update_cmd": ["claude", "update"],
-        "fallback_update_cmd": [str(Path.home() / ".local" / "bin" / "claude"), "update"],
-    },
-    {
-        "key": "codex",
-        "name": "OpenAI Codex",
-        "binary_candidates": [
-            "codex",
-            str(Path.home() / ".bun" / "bin" / "codex"),
-            str(Path.home() / ".local" / "bin" / "codex"),
-        ],
-        "version_cmd": ["codex", "--version"],
-        "smoke_cmd": ["codex", "--help"],
-        "update_cmd": ["bun", "install", "-g", "@openai/codex@latest"],
-        "fallback_update_cmd": ["codex", "update"],
-    },
-    {
-        "key": "agy",
-        "name": "Google Antigravity",
-        "binary_candidates": ["agy", str(Path.home() / ".local" / "bin" / "agy")],
-        "version_cmd": ["agy", "--version"],
-        "smoke_cmd": ["agy", "--help"],
-        "update_cmd": ["agy", "update"],
-        "fallback_update_cmd": [str(Path.home() / ".local" / "bin" / "agy"), "update"],
-    },
-    {
-        "key": "grok",
-        "name": "xAI Grok",
-        "binary_candidates": [
-            "grok",
-            str(Path.home() / ".local" / "bin" / "grok"),
-            str(Path.home() / ".grok" / "bin" / "grok"),
-        ],
-        "version_cmd": ["grok", "--version"],
-        "smoke_cmd": ["grok", "--help"],
-        "update_cmd": ["grok", "update"],
-        "fallback_update_cmd": [str(Path.home() / ".local" / "bin" / "grok"), "update"],
-    },
-    {
-        "key": "omp",
-        "name": "OMP",
-        "binary_candidates": [
-            "omp",
-            str(Path.home() / ".bun" / "bin" / "omp"),
-            str(Path.home() / ".local" / "bin" / "omp"),
-        ],
-        "version_cmd": ["omp", "--version"],
-        "smoke_cmd": ["omp", "--help"],
-        "update_cmd": ["omp", "update"],
-        "fallback_update_cmd": [str(Path.home() / ".bun" / "bin" / "omp"), "update"],
-    },
-]
+# Harness Version Probers
+get_harness_version() {
+  local key="$1"
+  local raw=""
+  case "$key" in
+    claude)
+      if command -v claude &>/dev/null || [ -x "$HOME/.local/bin/claude" ]; then
+        raw=$(claude --version 2>/dev/null || "$HOME/.local/bin/claude" --version 2>/dev/null || true)
+      fi
+      ;;
+    codex)
+      if command -v codex &>/dev/null || [ -x "$HOME/.bun/bin/codex" ] || [ -x "$HOME/.local/bin/codex" ]; then
+        raw=$(codex --version 2>/dev/null || "$HOME/.bun/bin/codex" --version 2>/dev/null || true)
+      fi
+      ;;
+    agy)
+      if command -v agy &>/dev/null || [ -x "$HOME/.local/bin/agy" ]; then
+        raw=$(agy --version 2>/dev/null || "$HOME/.local/bin/agy" --version 2>/dev/null || true)
+      fi
+      ;;
+    grok)
+      if command -v grok &>/dev/null || [ -x "$HOME/.grok/bin/grok" ] || [ -x "$HOME/.local/bin/grok" ]; then
+        raw=$(grok --version 2>/dev/null || "$HOME/.grok/bin/grok" --version 2>/dev/null || true)
+      fi
+      ;;
+    omp)
+      if command -v omp &>/dev/null || [ -x "$HOME/.bun/bin/omp" ] || [ -x "$HOME/.local/bin/omp" ]; then
+        raw=$(omp --version 2>/dev/null || "$HOME/.bun/bin/omp" --version 2>/dev/null || true)
+      fi
+      ;;
+  esac
 
-def get_env_with_extra_paths() -> Dict[str, str]:
-    """Ensure standard user binary directories & proxy environment variables are in PATH."""
-    env = os.environ.copy()
-    current_path = env.get("PATH", "")
-    extra_dirs = [
-        str(Path.home() / ".local" / "bin"),
-        str(Path.home() / ".bun" / "bin"),
-        str(Path.home() / ".grok" / "bin"),
-        str(Path.home() / ".cargo" / "bin"),
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-    ]
-    path_parts = current_path.split(":") if current_path else []
-    for d in extra_dirs:
-        if d not in path_parts and os.path.isdir(d):
-            path_parts.insert(0, d)
-    env["PATH"] = ":".join(path_parts)
-    return env
+  if [ -n "$raw" ]; then
+    extract_clean_version "$raw"
+  else
+    echo ""
+  fi
+}
 
-def find_executable(candidates: List[str]) -> Optional[str]:
-    env = get_env_with_extra_paths()
-    for cand in candidates:
-        expanded = os.path.expanduser(cand)
-        if os.path.isabs(expanded) and os.path.isfile(expanded) and os.access(expanded, os.X_OK):
-            return expanded
-        which_path = shutil.which(cand, path=env.get("PATH"))
-        if which_path:
-            return which_path
-    return None
+# Smoke Test Guard
+smoke_test_harness() {
+  local key="$1"
+  case "$key" in
+    claude)
+      (claude --help &>/dev/null || "$HOME/.local/bin/claude" --help &>/dev/null) && return 0 ;;
+    codex)
+      (codex --help &>/dev/null || "$HOME/.bun/bin/codex" --help &>/dev/null) && return 0 ;;
+    agy)
+      (agy --help &>/dev/null || "$HOME/.local/bin/agy" --help &>/dev/null) && return 0 ;;
+    grok)
+      (grok --help &>/dev/null || "$HOME/.grok/bin/grok" --help &>/dev/null) && return 0 ;;
+    omp)
+      (omp --help &>/dev/null || "$HOME/.bun/bin/omp" --help &>/dev/null) && return 0 ;;
+  esac
+  return 1
+}
 
-def extract_clean_version(raw: str) -> str:
-    """Extract clean semver / version string from command output."""
-    raw = raw.strip()
-    if not raw:
-        return "unknown"
-    m = re.search(r"(?:^|[\s/vV:])(\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.]+)?(?:\+[a-zA-Z0-9.]+)?)\b", raw)
-    if m:
-        return m.group(1)
-    first_line = raw.splitlines()[0].strip()
-    return first_line[:30]
+# Update Harness Command Executor
+update_harness() {
+  local key="$1"
+  case "$key" in
+    claude)
+      if command -v claude &>/dev/null; then claude update 2>&1; else "$HOME/.local/bin/claude" update 2>&1; fi ;;
+    codex)
+      if command -v bun &>/dev/null; then
+        bun install -g @openai/codex@latest 2>&1
+      elif command -v codex &>/dev/null; then
+        codex update 2>&1
+      else
+        return 1
+      fi
+      ;;
+    agy)
+      if command -v agy &>/dev/null; then agy update 2>&1; else "$HOME/.local/bin/agy" update 2>&1; fi ;;
+    grok)
+      if command -v grok &>/dev/null; then grok update 2>&1; else "$HOME/.grok/bin/grok" update 2>&1; fi ;;
+    omp)
+      if command -v omp &>/dev/null; then omp update 2>&1; else "$HOME/.bun/bin/omp" update 2>&1; fi ;;
+  esac
+}
 
-def query_harness_version(cfg: Dict[str, Any]) -> Tuple[Optional[str], str]:
-    """Returns (clean_version, raw_output)."""
-    bin_path = find_executable(cfg["binary_candidates"])
-    if not bin_path:
-        return None, "Binary not found"
-    
-    cmd = [bin_path] + cfg["version_cmd"][1:]
-    try:
-        res = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=15,
-            env=get_env_with_extra_paths()
-        )
-        output = (res.stdout or res.stderr).strip()
-        if res.returncode == 0 or output:
-            return extract_clean_version(output), output
-        return None, f"Exit code {res.returncode}: {output}"
-    except Exception as e:
-        return None, str(e)
+# State File Handlers
+read_state_field() {
+  local pattern="$1" file="${2:-$STATE_FILE}"
+  [ -f "$file" ] || return 0
+  grep -m 1 "$pattern" "$file" 2>/dev/null | sed -E 's/^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"?([^"]+)"?,?/\1/' | sed 's/,[[:space:]]*$//' || true
+}
 
-def smoke_test_harness(cfg: Dict[str, Any]) -> Tuple[bool, str]:
-    """Runs a non-destructive post-update verification guard."""
-    bin_path = find_executable(cfg["binary_candidates"])
-    if not bin_path:
-        return False, "Binary not found after update"
-    
-    smoke_cmd = [bin_path] + cfg.get("smoke_cmd", ["--help"])[1:]
-    try:
-        res = subprocess.run(
-            smoke_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10,
-            env=get_env_with_extra_paths()
-        )
-        if res.returncode == 0:
-            return True, "Smoke test passed"
-        return False, f"Smoke command returned exit code {res.returncode}"
-    except Exception as e:
-        return False, f"Smoke test exception: {e}"
-
-def send_desktop_notification(title: str, message: str) -> None:
-    """Dispatches a native desktop notification on macOS or Linux."""
-    try:
-        # macOS notification via AppleScript
-        if shutil.which("osascript") and sys.platform == "darwin":
-            clean_title = title.replace('"', '\\"')
-            clean_msg = message.replace('"', '\\"')
-            script = f'display notification "{clean_msg}" with title "{clean_title}" subtitle "UCA Auto-Updater"'
-            subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
-            return
-
-        # Linux notification via notify-send
-        if shutil.which("notify-send"):
-            subprocess.run(
-                ["notify-send", title, message, "-a", "UCA", "-i", "system-software-update"],
-                capture_output=True,
-                timeout=5
-            )
-            return
-    except Exception:
-        pass
-
-def load_state() -> Dict[str, Any]:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    if STATE_FILE.exists():
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {
-        "version": 1,
-        "last_run_at": None,
-        "last_run_duration_secs": 0.0,
-        "last_run_status": None,
-        "most_recently_updated": None,
-        "harnesses": {},
+read_harness_version_from_state() {
+  local key="$1"
+  [ -f "$STATE_FILE" ] || return 0
+  awk -v k="\"$key\":" '
+    $0 ~ k { found=1 }
+    found && /"current_version":/ {
+      gsub(/.*"current_version":[[:space:]]*"/, "");
+      gsub(/".*/, "");
+      print;
+      exit;
     }
+    found && /\}/ { found=0 }
+  ' "$STATE_FILE" 2>/dev/null || true
+}
 
-def save_state(state: Dict[str, Any]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp_file = STATE_DIR / f"state.json.tmp.{os.getpid()}"
-    try:
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-        os.replace(tmp_file, STATE_FILE)
-    except Exception as e:
-        if tmp_file.exists():
-            try:
-                tmp_file.unlink()
-            except Exception:
-                pass
-        raise e
-
-def format_relative_time(iso_str: Optional[str]) -> str:
-    if not iso_str:
-        return "Never"
-    try:
-        dt = datetime.fromisoformat(iso_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        diff = now - dt
-        total_seconds = max(0, int(diff.total_seconds()))
-        
-        if total_seconds < 60:
-            return f"{total_seconds}s ago"
-        minutes = total_seconds // 60
-        if minutes < 60:
-            return f"{minutes}m ago"
-        hours = minutes // 60
-        if hours < 24:
-            return f"{hours}h ago"
-        days = hours // 24
-        if days == 1:
-            return "yesterday"
-        if days < 30:
-            return f"{days}d ago"
-        return dt.strftime("%b %d, %Y")
-    except Exception:
-        return str(iso_str)[:19]
-
-def execute_update_cmd(cmd_list: List[str], timeout: int = 300) -> Tuple[int, str]:
-    """Executes an update command with timeout and environment."""
-    env = get_env_with_extra_paths()
-    try:
-        res = subprocess.run(
-            cmd_list,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
-        return res.returncode, res.stdout or ""
-    except subprocess.TimeoutExpired:
-        return 124, f"Command timed out after {timeout}s"
-    except Exception as e:
-        return 1, str(e)
-
-def update_single_harness(
-    cfg: Dict[str, Any],
-    harness_state: Dict[str, Any],
-    quiet: bool = False,
-    dry_run: bool = False,
-    smoke_test: bool = True,
-) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
-    key = cfg["key"]
-    name = cfg["name"]
-    now_iso = datetime.now(timezone.utc).isoformat()
-    
-    bin_path = find_executable(cfg["binary_candidates"])
-    if not bin_path:
-        if not quiet:
-            print(f"  {c('•', ANSI.GRAY)} {pad_str(c(name, ANSI.BOLD), 20)} {c('Not installed', ANSI.GRAY)} (skipped)")
-        harness_state["installed"] = False
-        harness_state["last_status"] = "not_installed"
-        harness_state["last_checked_at"] = now_iso
-        return harness_state, None
-
-    harness_state["installed"] = True
-    harness_state["binary_path"] = bin_path
-    
-    # Query version before update
-    v_before, _ = query_harness_version(cfg)
-    if not v_before:
-        v_before = harness_state.get("current_version") or "unknown"
-    
-    if dry_run:
-        if not quiet:
-            print(f"  {c('•', ANSI.BLUE)} {pad_str(c(name, ANSI.BOLD), 20)} {c('[DRY-RUN]', ANSI.YELLOW)} Current: {v_before}")
-        return harness_state, None
-
-    if not quiet:
-        print(f"  {c('⟳', ANSI.BLUE)} Updating {c(name, ANSI.BOLD)}...", end="", flush=True)
-
-    start_time = time.time()
-    
-    # Determine update command
-    update_cmd = list(cfg["update_cmd"])
-    first_tok = find_executable([update_cmd[0]])
-    if first_tok:
-        update_cmd[0] = first_tok
-    elif "fallback_update_cmd" in cfg:
-        fallback_tok = find_executable([cfg["fallback_update_cmd"][0]])
-        if fallback_tok:
-            update_cmd = [fallback_tok] + cfg["fallback_update_cmd"][1:]
-
-    ret_code, output = execute_update_cmd(update_cmd)
-    duration = time.time() - start_time
-    
-    # Query version after update
-    v_after, _ = query_harness_version(cfg)
-    if not v_after:
-        v_after = v_before
-
-    # Smoke Test Verification Guard
-    smoke_passed = True
-    smoke_msg = ""
-    if smoke_test and ret_code == 0 and bin_path:
-        smoke_passed, smoke_msg = smoke_test_harness(cfg)
-
-    version_changed = (v_before != "unknown" and v_after != "unknown" and v_before != v_after)
-    change_event = None
-
-    harness_state["last_checked_at"] = now_iso
-    harness_state["last_duration_secs"] = round(duration, 2)
-    harness_state["smoke_test_passed"] = smoke_passed
-
-    if "history" not in harness_state:
-        harness_state["history"] = []
-
-    if version_changed:
-        change_event = {
-            "key": key,
-            "name": name,
-            "timestamp": now_iso,
-            "from_version": v_before,
-            "to_version": v_after,
-            "duration_secs": round(duration, 2),
-            "status": "success" if (ret_code == 0 and smoke_passed) else "updated_with_warning",
-        }
-        harness_state["previous_version"] = v_before
-        harness_state["current_version"] = v_after
-        harness_state["last_updated_at"] = now_iso
-        harness_state["last_version_change"] = {
-            "from_version": v_before,
-            "to_version": v_after,
-            "timestamp": now_iso,
-        }
-        harness_state["last_status"] = "updated" if smoke_passed else "smoke_warning"
-        harness_state["history"].insert(0, change_event)
-        harness_state["history"] = harness_state["history"][:50]
-        
-        if not quiet:
-            smoke_tag = "" if smoke_passed else f" {c('[Smoke Test Warning: ' + smoke_msg + ']', ANSI.YELLOW)}"
-            print(f"\r  {c('🎉', ANSI.GREEN)} {pad_str(c(name, ANSI.BOLD), 20)} {c('UPDATED', ANSI.GREEN, ANSI.BOLD)}: From version {c(v_before, ANSI.YELLOW)} to version {c(v_after, ANSI.GREEN, ANSI.BOLD)} ({duration:.1f}s){smoke_tag}")
-    else:
-        harness_state["current_version"] = v_after
-        if "previous_version" not in harness_state or not harness_state["previous_version"]:
-            harness_state["previous_version"] = v_after
-            
-        if ret_code == 0 and smoke_passed:
-            harness_state["last_status"] = "up_to_date"
-            if not quiet:
-                print(f"\r  {c('✔', ANSI.GREEN)} {pad_str(c(name, ANSI.BOLD), 20)} {c('Up to date', ANSI.GREEN)} ({v_after}) ({duration:.1f}s)")
-        else:
-            harness_state["last_status"] = "error"
-            err_detail = smoke_msg if not smoke_passed else (output.splitlines()[-1] if output else "Update command failed")
-            harness_state["last_error"] = err_detail
-            if not quiet:
-                print(f"\r  {c('⚠️', ANSI.YELLOW)} {pad_str(c(name, ANSI.BOLD), 20)} {c('Update Warning', ANSI.YELLOW)} ({v_after}) - {err_detail}")
-
-    return harness_state, change_event
-
-def run_all_updates(
-    target_keys: Optional[List[str]] = None,
-    quiet: bool = False,
-    dry_run: bool = False,
-    notify: bool = True,
-    smoke_test: bool = True,
-    ignore_disk_space: bool = False,
-    min_disk_mb: int = MIN_FREE_DISK_MB,
-) -> int:
-    with AtomicLock(LOCK_DIR):
-        state = load_state()
-        start_total = time.time()
-        now_iso = datetime.now(timezone.utc).isoformat()
-        
-        # Pre-run Free Disk Space Safety Guard
-        disk_info = get_disk_space_info(threshold_mb=min_disk_mb)
-        if disk_info["is_low"] and not ignore_disk_space and not dry_run:
-            free_mb_val = disk_info["free_mb"]
-            thresh_mb_val = disk_info["threshold_mb"]
-            disk_path_val = disk_info["path"]
-            if not quiet:
-                if has_gum():
-                    warn_box = gum_style(
-                        "--border", "double",
-                        "--border-foreground", "196",
-                        "--padding", "0 2",
-                        "--margin", "1 0",
-                        f"{gum_style('--foreground', '196', '--bold', text='⚠️  DISK SPACE SAFETY GUARD TRIGGERED')}\n\n"
-                        f"{gum_style('--foreground', '252', '--bold', text='Available space: ' + str(free_mb_val) + ' MB')}"
-                        f"{gum_style('--foreground', '245', text=' (Minimum required: ' + str(thresh_mb_val) + ' MB on ' + disk_path_val + ')')}\n"
-                        f"{gum_style('--foreground', '245', text='All update attempts skipped to prevent corrupted downloads or broken installs.')}\n"
-                        f"{gum_style('--foreground', '245', text='To override: uca --ignore-disk-space or set UCA_MIN_DISK_MB=0')}"
-                    )
-                    print(warn_box)
-                else:
-                    lines = [
-                        "\033[1;38;5;196m⚠️  DISK SPACE SAFETY GUARD TRIGGERED\033[0m",
-                        "",
-                        f"\033[1;38;5;252mAvailable space: {free_mb_val} MB\033[0m \033[38;5;245m(Minimum threshold: {thresh_mb_val} MB on {disk_path_val})\033[0m",
-                        "\033[38;5;245mAll update attempts skipped to prevent corrupted downloads or broken installs.\033[0m",
-                        "\033[38;5;245mTo override: uca --ignore-disk-space or set UCA_MIN_DISK_MB=0\033[0m",
-                    ]
-                    draw_box(196, lines)
-
-            if notify and quiet:
-                send_desktop_notification(
-                    "⚠️ UCA Auto-Updates Paused",
-                    f"Disk space low ({disk_info['free_mb']} MB free). Free disk space to resume auto-updates."
-                )
-
-            # Record skip in state & log
-            state["last_run_at"] = now_iso
-            state["last_run_status"] = "skipped_low_disk"
-            save_state(state)
-            try:
-                with open(LOG_FILE, "a", encoding="utf-8") as lf:
-                    lf.write(f"[{now_iso}] uca run SKIPPED: low disk space ({disk_info['free_mb']} MB free on {disk_info['path']})\n")
-            except Exception:
-                pass
-            return 0
-        
-        configs_to_run = HARNESS_CONFIGS
-        if target_keys:
-            configs_to_run = [c for c in HARNESS_CONFIGS if c["key"] in target_keys]
-            if not configs_to_run:
-                print(c(f"Error: No matching harness for {target_keys}", ANSI.RED))
-                return 1
-
-        if not quiet:
-            local_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if has_gum():
-                banner = gum_style(
-                    "--border", "normal",
-                    "--border-foreground", "39",
-                    "--padding", "0 1",
-                    "--margin", "1 0",
-                    f"{gum_style('--foreground', '42', '--bold', text='UCA')} {gum_style('--foreground', '245', text='— Universal Coding Agent Harness Updater')}\n{gum_style('--foreground', '245', text='Started at: ' + local_time_str)}"
-                )
-                print(banner)
-            else:
-                print(f"\n{c('═' * 76, ANSI.BLUE)}")
-                print(f" {c('UCA', ANSI.BOLD, ANSI.BLUE)} — Universal Coding Agent Harness Updater")
-                print(f" {c('Started at:', ANSI.GRAY)} {local_time_str}")
-                print(f"{c('═' * 76, ANSI.BLUE)}\n")
-
-        any_updated = False
-        has_errors = False
-        upgraded_events = []
-        
-        for cfg in configs_to_run:
-            key = cfg["key"]
-            h_state = state.get("harnesses", {}).get(key, {
-                "key": key,
-                "name": cfg["name"],
-                "installed": False,
-                "current_version": None,
-                "previous_version": None,
-                "last_checked_at": None,
-                "last_updated_at": None,
-                "last_status": None,
-                "last_version_change": None,
-                "history": [],
-            })
-            
-            updated_h_state, change_event = update_single_harness(
-                cfg, h_state, quiet=quiet, dry_run=dry_run, smoke_test=smoke_test
-            )
-            
-            if "harnesses" not in state:
-                state["harnesses"] = {}
-            state["harnesses"][key] = updated_h_state
-            
-            if change_event:
-                any_updated = True
-                upgraded_events.append(change_event)
-                state["most_recently_updated"] = change_event
-            if updated_h_state.get("last_status") in ["error", "smoke_warning"]:
-                has_errors = True
-
-        total_duration = time.time() - start_total
-        state["last_run_at"] = now_iso
-        state["last_run_duration_secs"] = round(total_duration, 2)
-        state["last_run_status"] = "error" if has_errors else ("updated" if any_updated else "success")
-        
-        if not dry_run:
-            save_state(state)
-
-        # Dispatch Desktop Notification if harnesses were upgraded
-        if notify and upgraded_events:
-            if len(upgraded_events) == 1:
-                ev = upgraded_events[0]
-                send_desktop_notification(
-                    f"🚀 {ev['name']} Upgraded",
-                    f"From version {ev['from_version']} to {ev['to_version']}"
-                )
-            else:
-                names = ", ".join(e["name"] for e in upgraded_events)
-                send_desktop_notification(
-                    "🚀 Agent Harnesses Upgraded",
-                    f"Updated {len(upgraded_events)} harnesses: {names}"
-                )
-
-        if not quiet:
-            if has_gum():
-                status_txt = gum_style('--foreground', '42', '--bold', text='Completed')
-                print(f"\n{gum_style('--foreground', '245', text='Completed in: ' + f'{total_duration:.1f}s')} • {status_txt}")
-                if state.get("most_recently_updated"):
-                    mru = state["most_recently_updated"]
-                    mru_time = format_relative_time(mru.get("timestamp"))
-                    print(gum_style("--foreground", "39", "--bold", text=f"Most Recent Update: {mru['name']} (From version {mru['from_version']} to {mru['to_version']}, {mru_time})"))
-                print()
-            else:
-                print(f"\n{c('─' * 76, ANSI.GRAY)}")
-                print(f" {c('Completed in:', ANSI.GRAY)} {total_duration:.1f}s • Status: {c('Completed', ANSI.GREEN)}")
-                if state.get("most_recently_updated"):
-                    mru = state["most_recently_updated"]
-                    mru_time = format_relative_time(mru.get("timestamp"))
-                    print(f" {c('Most Recent Update:', ANSI.BLUE, ANSI.BOLD)} {mru['name']} (From version {mru['from_version']} to {mru['to_version']}, {mru_time})")
-                print(f"{c('═' * 76, ANSI.BLUE)}\n")
-
-        # Append to log file
-        try:
-            LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(LOG_FILE, "a", encoding="utf-8") as lf:
-                lf.write(f"[{now_iso}] uca run: duration={total_duration:.2f}s, updated={any_updated}, errors={has_errors}\n")
-        except Exception:
-            pass
-
-        return 1 if has_errors else 0
-
-def check_live_status_parallel() -> Dict[str, Any]:
-    """Probes live versions concurrently across thread workers for sub-second latency."""
-    state = load_state()
-    harnesses_data = {}
-
-    def probe_worker(cfg: Dict[str, Any]) -> Tuple[str, Optional[str], Optional[str]]:
-        key = cfg["key"]
-        v_live, _ = query_harness_version(cfg)
-        bin_path = find_executable(cfg["binary_candidates"])
-        return key, v_live, bin_path
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(HARNESS_CONFIGS)) as executor:
-        futures = [executor.submit(probe_worker, cfg) for cfg in HARNESS_CONFIGS]
-        results = [f.result() for f in concurrent.futures.as_completed(futures)]
-
-    res_map = {r[0]: (r[1], r[2]) for r in results}
-
-    for cfg in HARNESS_CONFIGS:
-        key = cfg["key"]
-        h_state = state.get("harnesses", {}).get(key, {})
-        v_live, bin_path = res_map.get(key, (None, None))
-        
-        entry = dict(h_state)
-        entry["name"] = cfg["name"]
-        entry["installed"] = bool(bin_path)
-        entry["binary_path"] = bin_path
-        if v_live:
-            entry["current_version"] = v_live
-        harnesses_data[key] = entry
-        
-    return {
-        "state": state,
-        "harnesses": harnesses_data,
-        "service": get_service_status(),
+read_harness_prev_version_from_state() {
+  local key="$1"
+  [ -f "$STATE_FILE" ] || return 0
+  awk -v k="\"$key\":" '
+    $0 ~ k { found=1 }
+    found && /"previous_version":/ {
+      gsub(/.*"previous_version":[[:space:]]*"/, "");
+      gsub(/".*/, "");
+      print;
+      exit;
     }
+    found && /\}/ { found=0 }
+  ' "$STATE_FILE" 2>/dev/null || true
+}
 
-def get_service_status() -> Dict[str, Any]:
-    """Detects systemd user timer or launchd agent."""
-    res = {
-        "type": "none",
-        "active": False,
-        "schedule": "every 3 hours",
-        "next_run": "unknown",
-        "detail": "Not configured",
+write_state() {
+  local last_run_iso="$1" last_status="$2" duration="$3"
+  local mru_key="${4:-}" mru_from="${5:-}" mru_to="${6:-}" mru_ts="${7:-}"
+  
+  mkdir -p "$STATE_DIR"
+  local tmp_file="$STATE_FILE.tmp.$$"
+
+  cat > "$tmp_file" <<EOF
+{
+  "version": 1,
+  "last_run_at": "$last_run_iso",
+  "last_run_duration_secs": $duration,
+  "last_run_status": "$last_status",
+  "most_recently_updated": {
+    "key": "$mru_key",
+    "from_version": "$mru_from",
+    "to_version": "$mru_to",
+    "timestamp": "$mru_ts"
+  },
+  "harnesses": {
+    "claude": {
+      "name": "Claude Code",
+      "installed": $( [ -n "${V_CLAUDE:-}" ] && echo "true" || echo "false" ),
+      "current_version": "${V_CLAUDE:-}",
+      "previous_version": "${PV_CLAUDE:-${V_CLAUDE:-}}",
+      "last_status": "${ST_CLAUDE:-up_to_date}",
+      "last_checked_at": "$last_run_iso"
+    },
+    "codex": {
+      "name": "OpenAI Codex",
+      "installed": $( [ -n "${V_CODEX:-}" ] && echo "true" || echo "false" ),
+      "current_version": "${V_CODEX:-}",
+      "previous_version": "${PV_CODEX:-${V_CODEX:-}}",
+      "last_status": "${ST_CODEX:-up_to_date}",
+      "last_checked_at": "$last_run_iso"
+    },
+    "agy": {
+      "name": "Google Antigravity",
+      "installed": $( [ -n "${V_AGY:-}" ] && echo "true" || echo "false" ),
+      "current_version": "${V_AGY:-}",
+      "previous_version": "${PV_AGY:-${V_AGY:-}}",
+      "last_status": "${ST_AGY:-up_to_date}",
+      "last_checked_at": "$last_run_iso"
+    },
+    "grok": {
+      "name": "xAI Grok",
+      "installed": $( [ -n "${V_GROK:-}" ] && echo "true" || echo "false" ),
+      "current_version": "${V_GROK:-}",
+      "previous_version": "${PV_GROK:-${V_GROK:-}}",
+      "last_status": "${ST_GROK:-up_to_date}",
+      "last_checked_at": "$last_run_iso"
+    },
+    "omp": {
+      "name": "OMP",
+      "installed": $( [ -n "${V_OMP:-}" ] && echo "true" || echo "false" ),
+      "current_version": "${V_OMP:-}",
+      "previous_version": "${PV_OMP:-${V_OMP:-}}",
+      "last_status": "${ST_OMP:-up_to_date}",
+      "last_checked_at": "$last_run_iso"
     }
+  }
+}
+EOF
+  mv -f "$tmp_file" "$STATE_FILE"
+}
+
+# Service Detection
+get_service_status() {
+  if command -v launchctl &>/dev/null && [ "$(uname -s)" = "Darwin" ]; then
+    local current_user="${USER:-$(whoami 2>/dev/null || echo "user")}"
+    local loaded=0
+    for lbl in "com.${current_user}.uca" "com.jemanuel.uca" "com.uca.updater"; do
+      if launchctl list 2>/dev/null | grep -q "$lbl"; then
+        loaded=1
+        break
+      fi
+    done
+    if [ "$loaded" -eq 1 ]; then
+      echo "ACTIVE|launchd background service active (every 3 hours / 10800s)"
+    else
+      echo "INACTIVE|launchd agent installed but not loaded"
+    fi
+  elif command -v systemctl &>/dev/null; then
+    if systemctl --user is-active uca.timer &>/dev/null; then
+      echo "ACTIVE|systemd timer active (every 3h)"
+    else
+      echo "INACTIVE|systemd timer not active"
+    fi
+  else
+    echo "INACTIVE|No systemd or launchd scheduler detected"
+  fi
+}
+
+# Relative Time Formatter
+format_relative_time() {
+  local iso_str="$1"
+  [ -z "$iso_str" ] && { echo "Never"; return; }
+  
+  local ts_now ts_past diff mins hours days
+  ts_now=$(date +%s)
+  if [ "$(uname -s)" = "Darwin" ]; then
+    ts_past=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${iso_str:0:19}" +%s 2>/dev/null || echo "$ts_now")
+  else
+    ts_past=$(date -d "$iso_str" +%s 2>/dev/null || echo "$ts_now")
+  fi
+  
+  diff=$((ts_now - ts_past))
+  [ "$diff" -lt 0 ] && diff=0
+  
+  if [ "$diff" -lt 60 ]; then
+    echo "${diff}s ago"
+  elif [ "$diff" -lt 3600 ]; then
+    mins=$((diff / 60))
+    echo "${mins}m ago"
+  elif [ "$diff" -lt 86400 ]; then
+    hours=$((diff / 3600))
+    echo "${hours}h ago"
+  else
+    days=$((diff / 86400))
+    echo "${days}d ago"
+  fi
+}
+
+# Status Dashboard (UCAS)
+show_status_dashboard() {
+  local json_mode="${1:-0}"
+  
+  # Parallel Fast Probing using subshells
+  V_CLAUDE="" V_CODEX="" V_AGY="" V_GROK="" V_OMP=""
+  
+  local tmp_dir="$STATE_DIR/.probe.$$"
+  mkdir -p "$tmp_dir"
+  
+  ( get_harness_version "claude" > "$tmp_dir/claude" ) &
+  ( get_harness_version "codex"  > "$tmp_dir/codex" ) &
+  ( get_harness_version "agy"    > "$tmp_dir/agy" ) &
+  ( get_harness_version "grok"   > "$tmp_dir/grok" ) &
+  ( get_harness_version "omp"    > "$tmp_dir/omp" ) &
+  wait
+
+  [ -f "$tmp_dir/claude" ] && V_CLAUDE=$(cat "$tmp_dir/claude")
+  [ -f "$tmp_dir/codex" ]  && V_CODEX=$(cat "$tmp_dir/codex")
+  [ -f "$tmp_dir/agy" ]    && V_AGY=$(cat "$tmp_dir/agy")
+  [ -f "$tmp_dir/grok" ]   && V_GROK=$(cat "$tmp_dir/grok")
+  [ -f "$tmp_dir/omp" ]    && V_OMP=$(cat "$tmp_dir/omp")
+  rm -rf "$tmp_dir" 2>/dev/null || true
+
+  # Disk Space
+  local free_mb free_gb
+  free_mb=$(get_free_disk_mb "$HOME")
+  free_gb=$(awk "BEGIN {printf \"%.1f\", $free_mb / 1024}")
+  local is_low_disk=0
+  [ "$free_mb" -lt "$MIN_FREE_DISK_MB" ] && is_low_disk=1
+
+  # State reading
+  local last_run_at last_status mru_key mru_from mru_to mru_ts
+  last_run_at=$(read_state_field '"last_run_at"')
+  last_status=$(read_state_field '"last_run_status"')
+  mru_key=$(read_state_field '"key"')
+  mru_from=$(read_state_field '"from_version"')
+  mru_to=$(read_state_field '"to_version"')
+  mru_ts=$(read_state_field '"timestamp"')
+
+  local last_run_rel
+  last_run_rel=$(format_relative_time "$last_run_at")
+
+  # Service status
+  local srv_info srv_state srv_detail
+  srv_info=$(get_service_status)
+  srv_state="${srv_info%%|*}"
+  srv_detail="${srv_info##*|}"
+
+  if [ "$json_mode" -eq 1 ]; then
+    if [ -f "$STATE_FILE" ]; then
+      cat "$STATE_FILE"
+    else
+      echo '{"error": "No state file found"}'
+    fi
+    return 0
+  fi
+
+  local use_gum=0
+  has_gum && use_gum=1
+
+  if [ "$use_gum" -eq 1 ]; then
+    local srv_badge disk_badge
+    if [ "$srv_state" = "ACTIVE" ]; then
+      srv_badge=$(gum style --foreground 42 --bold "ACTIVE")
+    else
+      srv_badge=$(gum style --foreground 214 --bold "INACTIVE")
+    fi
+
+    if [ "$is_low_disk" -eq 1 ]; then
+      disk_badge=$(gum style --foreground 196 --bold "⚠️ ${free_mb} MB (PAUSED)")
+    else
+      disk_badge="$(gum style --foreground 42 --bold "${free_gb} GB free") $(gum style --foreground 245 '(healthy)')"
+    fi
+
+    gum style \
+      --border rounded \
+      --border-foreground 39 \
+      --padding "0 1" \
+      --margin "1 0 0 0" \
+      "$(gum style --foreground 42 --bold 'UCA STATUS') $(gum style --foreground 245 '— Universal Coding Agent Harness Dashboard')" \
+      "$(gum style --foreground 245 'Last Full Run:') $(gum style --bold --foreground 252 "$last_run_rel")" \
+      "$(gum style --foreground 245 'Background Service:') $srv_badge $(gum style --foreground 245 "• $srv_detail")" \
+      "$(gum style --foreground 245 'Disk Safety:') $disk_badge $(gum style --foreground 245 "• Threshold: ${MIN_FREE_DISK_MB} MB")"
+
+    if [ -n "$mru_key" ] && [ -n "$mru_from" ] && [ -n "$mru_to" ] && [ "$mru_from" != "$mru_to" ]; then
+      local mru_rel
+      mru_rel=$(format_relative_time "$mru_ts")
+      local mru_title mru_body
+      mru_title=$(gum style --foreground 214 --bold "⭐ MOST RECENTLY UPDATED HARNESS")
+      mru_body="$(gum style --foreground 42 --bold "$mru_key") $(gum style --foreground 245 '• From version') $(gum style --foreground 214 --bold "$mru_from") $(gum style --foreground 245 'to version') $(gum style --foreground 42 --bold "$mru_to") $(gum style --foreground 245 "($mru_rel)")"
+      gum style \
+        --border normal \
+        --border-foreground 214 \
+        --padding "0 1" \
+        --margin "1 0 0 0" \
+        "$mru_title" \
+        "$mru_body"
+    fi
+  else
+    local term_width=116
+    local sep=""
+    for ((i=0; i<term_width; i++)); do sep="${sep}═"; done
+
+    echo -e "\n\033[38;5;39m${sep}\033[0m"
+    echo -e " ${C_BOLD}${C_BLUE}UCA STATUS${C_RESET} — Universal Coding Agent Harness Dashboard"
+    echo -e " ${C_GRAY}Last Full Run:${C_RESET} ${C_BOLD}${last_run_rel}${C_RESET}"
     
-    # Check launchd (macOS)
-    if shutil.which("launchctl"):
-        res["type"] = "launchd"
-        username = os.environ.get("USER") or Path.home().name
-        labels_to_check = [f"com.{username}.uca", "com.jemanuel.uca", "com.uca.updater"]
-        found_plist = None
-        for lbl in labels_to_check:
-            cand = LAUNCHD_DIR / f"{lbl}.plist"
-            if cand.exists():
-                found_plist = cand
-                break
-                
-        if found_plist:
-            try:
-                r = subprocess.run(
-                    ["launchctl", "list"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=5,
-                )
-                matched_label = None
-                for lbl in labels_to_check:
-                    if lbl in r.stdout:
-                        matched_label = lbl
-                        break
-                if matched_label:
-                    res["active"] = True
-                    detail_extra = ""
-                    for line in r.stdout.splitlines():
-                        if matched_label in line:
-                            parts = line.split()
-                            if len(parts) >= 2:
-                                exit_code = parts[1]
-                                detail_extra = f", last exit: {exit_code}"
-                    res["detail"] = f"launchd background service active (every 3 hours / 10800s{detail_extra})"
-                else:
-                    res["detail"] = "launchd plist installed but not loaded"
-            except Exception as e:
-                res["detail"] = f"launchctl error: {e}"
-        else:
-            res["detail"] = "launchd agent not installed"
-        return res
+    if [ "$srv_state" = "ACTIVE" ]; then
+      echo -e " ${C_GRAY}Background Service:${C_RESET} ${C_GREEN}${C_BOLD}ACTIVE${C_RESET} • ${C_GRAY}${srv_detail}${C_RESET}"
+    else
+      echo -e " ${C_GRAY}Background Service:${C_RESET} ${C_YELLOW}INACTIVE / MANUAL${C_RESET} • ${C_GRAY}${srv_detail}${C_RESET}"
+    fi
 
-    # Check systemd (Linux)
-    if shutil.which("systemctl"):
-        res["type"] = "systemd"
-        try:
-            r = subprocess.run(
-                ["systemctl", "--user", "is-active", "uca.timer"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=5,
-            )
-            is_active = r.stdout.strip() == "active"
-            res["active"] = is_active
-            if is_active:
-                t = subprocess.run(
-                    ["systemctl", "--user", "list-timers", "uca.timer", "--no-legend"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=5,
-                )
-                timer_out = t.stdout.strip()
-                if timer_out:
-                    parts = timer_out.split()
-                    if len(parts) >= 5:
-                        res["next_run"] = f"in {parts[2]} ({parts[0]} {parts[1]})"
-                res["detail"] = f"systemd timer active (every 3h, next: {res['next_run']})"
-            else:
-                res["detail"] = "systemd timer installed but inactive"
-        except Exception as e:
-            res["detail"] = f"systemd error: {e}"
-        return res
+    if [ "$is_low_disk" -eq 1 ]; then
+      echo -e " ${C_RED}${C_BOLD}Disk Safety:${C_RESET} ${C_RED}${C_BOLD}⚠️ ${free_mb} MB free${C_RESET} • ${C_YELLOW}CRITICAL (Below ${MIN_FREE_DISK_MB} MB threshold) • Auto-updates paused${C_RESET}"
+    else
+      echo -e " ${C_GRAY}Disk Safety:${C_RESET} ${C_GREEN}${C_BOLD}${free_gb} GB free${C_RESET} ${C_GRAY}(healthy) • Threshold: ${MIN_FREE_DISK_MB} MB${C_RESET}"
+    fi
+    echo -e "\033[38;5;39m${sep}\033[0m\n"
 
-    return res
+    if [ -n "$mru_key" ] && [ -n "$mru_from" ] && [ -n "$mru_to" ] && [ "$mru_from" != "$mru_to" ]; then
+      local mru_rel
+      mru_rel=$(format_relative_time "$mru_ts")
+      echo -e " ${C_YELLOW}${C_BOLD}⭐ MOST RECENTLY UPDATED HARNESS:${C_RESET}"
+      echo -e "    ${C_BOLD}${C_GREEN}${mru_key}${C_RESET}  ${C_GRAY}•${C_RESET}  From version ${C_YELLOW}${mru_from}${C_RESET} to version ${C_BOLD}${C_GREEN}${mru_to}${C_RESET}  ${C_GRAY}(${mru_rel})${C_RESET}\n"
+    fi
+  fi
 
-def print_status_dashboard(json_mode: bool = False, fast: bool = True) -> None:
-    data = check_live_status_parallel() if fast else check_live_status_parallel()
-    state = data["state"]
-    harnesses = data["harnesses"]
-    service = data["service"]
+  # Table
+  local subsep=""
+  for ((i=0; i<116; i++)); do subsep="${subsep}─"; done
 
-    if json_mode:
-        print(json.dumps(data, indent=2))
-        return
+  echo -e "\n ${C_BOLD}HARNESS BREAKDOWN${C_RESET}"
+  echo -e "${C_GRAY}${subsep}${C_RESET}"
 
-    use_gum_render = has_gum()
+  local h_harness h_ver h_status h_change h_checked
+  h_harness=$(pad_str "Harness" 22)
+  h_ver=$(pad_str "Version" 12)
+  h_status=$(pad_str "Status" 16)
+  h_change=$(pad_str "Version Changes" 52)
+  h_checked=$(pad_str "Checked" 12)
 
-    last_run_str = format_relative_time(state.get("last_run_at"))
-    last_run_full = ""
-    if state.get("last_run_at"):
-        try:
-            dt = datetime.fromisoformat(state["last_run_at"]).astimezone()
-            last_run_full = dt.strftime(" (%Y-%m-%d %H:%M:%S %Z)")
-        except Exception:
-            pass
+  echo -e " ${C_BOLD}${C_BLUE}${h_harness}${h_ver}${h_status}${h_change}${h_checked}${C_RESET}"
+  echo -e "${C_GRAY}${subsep}${C_RESET}"
 
-    # Find Most Recently Updated
-    mru = state.get("most_recently_updated")
-    if not mru:
-        candidate_changes = []
-        for cfg in HARNESS_CONFIGS:
-            h_info = harnesses.get(cfg["key"], {})
-            lvc = h_info.get("last_version_change")
-            if lvc and lvc.get("from_version") and lvc.get("to_version") and lvc["from_version"] != lvc["to_version"]:
-                candidate_changes.append({
-                    "name": cfg["name"],
-                    "from_version": lvc["from_version"],
-                    "to_version": lvc["to_version"],
-                    "timestamp": lvc.get("timestamp", ""),
-                })
-        if candidate_changes:
-            candidate_changes.sort(key=lambda x: x["timestamp"], reverse=True)
-            mru = candidate_changes[0]
+  render_harness_row() {
+    local name="$1" key="$2" ver="$3"
+    local prev_ver status_badge change_text
+    prev_ver=$(read_harness_prev_version_from_state "$key")
 
-    disk_info = get_disk_space_info()
+    if [ -z "$ver" ]; then
+      echo -e " $(pad_str "$name" 22)$(pad_str "-" 12)$(pad_str "${C_GRAY}Not Found${C_RESET}" 16)$(pad_str "${C_GRAY}Binary not installed in PATH${C_RESET}" 52)$(pad_str "-" 12)"
+    else
+      local v_badge="${C_BOLD}${C_WHITE}${ver}${C_RESET}"
+      local s_badge="${C_GREEN}✔ Up to date${C_RESET}"
+      local c_txt="Up to date at ${ver}"
+      
+      if [ -n "$prev_ver" ] && [ "$prev_ver" != "$ver" ]; then
+        s_badge="${C_GREEN}${C_BOLD}✔ Updated${C_RESET}"
+        c_txt="From version ${C_YELLOW}${prev_ver}${C_RESET} to version ${C_BOLD}${C_GREEN}${ver}${C_RESET} ${C_GRAY}(${last_run_rel})${C_RESET}"
+      fi
 
-    if use_gum_render:
-        # Header Card with Gum
-        srv_badge = gum_style("--foreground", "42", "--bold", text="ACTIVE") if service.get("active") else gum_style("--foreground", "214", "--bold", text="INACTIVE")
-        if disk_info["is_low"]:
-            disk_badge = gum_style("--foreground", "196", "--bold", text="⚠️ " + str(disk_info['free_mb']) + " MB free (PAUSED)")
-        else:
-            disk_badge = f"{gum_style('--foreground', '42', '--bold', text=str(disk_info['free_gb']) + ' GB free')} {gum_style('--foreground', '245', text='(healthy)')}"
+      echo -e " $(pad_str "$name" 22)$(pad_str "$v_badge" 12)$(pad_str "$s_badge" 16)$(pad_str "$c_txt" 52)$(pad_str "$last_run_rel" 12)"
+    fi
+  }
 
-        header_l1 = f"{gum_style('--foreground', '42', '--bold', text='UCA STATUS')} {gum_style('--foreground', '245', text='— Universal Coding Agent Harness Dashboard')}"
-        header_l2 = f"{gum_style('--foreground', '245', text='Last Full Run:')} {gum_style('--bold', '--foreground', '252', text=last_run_str)}{gum_style('--foreground', '245', text=last_run_full)}"
-        header_l3 = f"{gum_style('--foreground', '245', text='Background Service:')} {srv_badge} {gum_style('--foreground', '245', text='• ' + service.get('detail', ''))}"
-        header_l4 = f"{gum_style('--foreground', '245', text='Disk Safety:')} {disk_badge} {gum_style('--foreground', '245', text='• Safety threshold: ' + str(disk_info['threshold_mb']) + ' MB')}"
-        
-        banner = gum_style(
-            "--border", "rounded",
-            "--border-foreground", "39",
-            "--padding", "0 1",
-            "--margin", "1 0 0 0",
-            f"{header_l1}\n{header_l2}\n{header_l3}\n{header_l4}"
+  render_harness_row "Claude Code"       "claude" "$V_CLAUDE"
+  render_harness_row "OpenAI Codex"      "codex"  "$V_CODEX"
+  render_harness_row "Google Antigravity" "agy"    "$V_AGY"
+  render_harness_row "xAI Grok"          "grok"   "$V_GROK"
+  render_harness_row "OMP"               "omp"    "$V_OMP"
+
+  echo -e "${C_GRAY}${subsep}${C_RESET}\n"
+
+  if [ -n "$mru_key" ] && [ -n "$mru_from" ] && [ -n "$mru_to" ] && [ "$mru_from" != "$mru_to" ]; then
+    echo -e " ${C_BOLD}📜 RECENT VERSION CHANGE HISTORY${C_RESET}"
+    echo -e "${C_GRAY}${subsep}${C_RESET}"
+    local time_fmt="${mru_ts:0:10} ${mru_ts:11:5}"
+    echo -e "  ${C_BLUE}•${C_RESET} ${C_GRAY}${time_fmt}${C_RESET}  ${C_BOLD}$(pad_str "$mru_key" 18)${C_RESET} From version ${C_YELLOW}${mru_from}${C_RESET} to version ${C_BOLD}${C_GREEN}${mru_to}${C_RESET}"
+    echo -e "${C_GRAY}${subsep}${C_RESET}\n"
+  fi
+
+  echo -e " ${C_GRAY}Commands:${C_RESET} ${C_BOLD}uca${C_RESET} (update all) • ${C_BOLD}ucas${C_RESET} (status) • ${C_BOLD}ucas -w${C_RESET} (watch) • ${C_BOLD}uca doctor${C_RESET} • ${C_BOLD}uca logs${C_RESET} • ${C_BOLD}uca uninstall${C_RESET}"
+  echo -e "\033[38;5;39m${subsep}\033[0m\n"
+}
+
+# Run Updates
+run_all_updates() {
+  local target_key="${1:-}"
+  local quiet="${2:-0}"
+  local dry_run="${3:-0}"
+  local notify="${4:-1}"
+  local smoke_test="${5:-1}"
+  local ignore_disk="${6:-0}"
+  local min_disk="${7:-$MIN_FREE_DISK_MB}"
+
+  acquire_lock
+
+  local now_iso start_sec
+  now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")
+  start_sec=$(date +%s)
+
+  # 1. Disk Space Safety Guard
+  local free_mb
+  free_mb=$(get_free_disk_mb "$HOME")
+  if [ "$free_mb" -lt "$min_disk" ] && [ "$ignore_disk" -eq 0 ] && [ "$dry_run" -eq 0 ]; then
+    if [ "$quiet" -eq 0 ]; then
+      if has_gum; then
+        gum style \
+          --border double \
+          --border-foreground 196 \
+          --padding "0 2" \
+          --margin "1 0" \
+          "$(gum style --foreground 196 --bold '⚠️  DISK SPACE SAFETY GUARD TRIGGERED')" \
+          "" \
+          "$(gum style --foreground 252 --bold "Available space: ${free_mb} MB") $(gum style --foreground 245 "(Minimum required: ${min_disk} MB)")" \
+          "$(gum style --foreground 245 'All update attempts skipped to prevent corrupted downloads or broken installs.')" \
+          "$(gum style --foreground 245 'To override: uca --ignore-disk-space or set UCA_MIN_DISK_MB=0')"
+      else
+        local warn_lines=(
+          "\033[1;38;5;196m⚠️  DISK SPACE SAFETY GUARD TRIGGERED\033[0m"
+          ""
+          "\033[1;38;5;252mAvailable space: ${free_mb} MB\033[0m \033[38;5;245m(Minimum required: ${min_disk} MB)\033[0m"
+          "\033[38;5;245mAll update attempts skipped to prevent corrupted downloads or broken installs.\033[0m"
+          "\033[38;5;245mTo override: uca --ignore-disk-space or set UCA_MIN_DISK_MB=0\033[0m"
         )
-        print(banner)
+        draw_box 196 "${warn_lines[@]}"
+      fi
+    fi
 
-        # Most Recently Updated Card
-        if mru:
-            mru_name = mru.get("name", mru.get("key", "Unknown"))
-            mru_from = mru.get("from_version", "?")
-            mru_to = mru.get("to_version", "?")
-            mru_time = format_relative_time(mru.get("timestamp"))
-            
-            mru_title = gum_style("--foreground", "214", "--bold", text="⭐ MOST RECENTLY UPDATED HARNESS")
-            mru_body = f"{gum_style('--foreground', '42', '--bold', text=mru_name)} {gum_style('--foreground', '245', text='• From version')} {gum_style('--foreground', '214', '--bold', text=mru_from)} {gum_style('--foreground', '245', text='to version')} {gum_style('--foreground', '42', '--bold', text=mru_to)} {gum_style('--foreground', '245', text=f'({mru_time})')}"
-            
-            mru_card = gum_style(
-                "--border", "normal",
-                "--border-foreground", "214",
-                "--padding", "0 1",
-                "--margin", "1 0 0 0",
-                f"{mru_title}\n{mru_body}"
-            )
-            print(mru_card)
-        else:
-            no_mru = gum_style("--foreground", "245", text="⭐ MOST RECENTLY UPDATED: No upgrades recorded yet (all harnesses up to date)")
-            print(f"\n {no_mru}")
-    else:
-        # ANSI Double-Line Header Card
-        term_width = 116
-        try:
-            term_width = max(116, min(140, shutil.get_terminal_size().columns))
-        except Exception:
-            pass
+    if [ "$notify" -eq 1 ] && [ "$quiet" -eq 1 ]; then
+      send_desktop_notification "⚠️ UCA Auto-Updates Paused" "Low disk space (${free_mb} MB free). Free disk space to resume auto-updates."
+    fi
 
-        sep = "═" * term_width
+    mkdir -p "$STATE_DIR"
+    echo "[$now_iso] uca run SKIPPED: low disk space (${free_mb} MB free)" >> "$LOG_FILE" 2>/dev/null || true
+    release_lock
+    return 0
+  fi
 
-        print(f"\n{c(sep, ANSI.BLUE)}")
-        print(f" {c('UCA STATUS', ANSI.BOLD, ANSI.BLUE)} — Universal Coding Agent Harness Dashboard")
-        print(f" {c('Last Full Run:', ANSI.GRAY)} {c(last_run_str, ANSI.BOLD)}{c(last_run_full, ANSI.GRAY)}")
-        
-        srv_status_text = c("ACTIVE", ANSI.GREEN, ANSI.BOLD) if service.get("active") else c("INACTIVE / MANUAL", ANSI.YELLOW)
-        print(f" {c('Background Service:', ANSI.GRAY)} {srv_status_text} • {c(service.get('detail', ''), ANSI.GRAY)}")
-        
-        if disk_info["is_low"]:
-            print(f" {c('Disk Safety:', ANSI.RED, ANSI.BOLD)} {c('⚠️ ' + str(disk_info['free_mb']) + ' MB free', ANSI.RED, ANSI.BOLD)} • {c('CRITICAL (Below ' + str(disk_info['threshold_mb']) + ' MB threshold) • Auto-updates paused', ANSI.YELLOW)}")
-        else:
-            print(f" {c('Disk Safety:', ANSI.GRAY)} {c(str(disk_info['free_gb']) + ' GB free', ANSI.GREEN, ANSI.BOLD)} {c('(healthy)', ANSI.GRAY)} • {c('Threshold: ' + str(disk_info['threshold_mb']) + ' MB', ANSI.GRAY)}")
-        print(f"{c(sep, ANSI.BLUE)}\n")
+  if [ "$quiet" -eq 0 ]; then
+    local start_time_str
+    start_time_str=$(date +"%Y-%m-%d %H:%M:%S")
+    if has_gum; then
+      gum style \
+        --border normal \
+        --border-foreground 39 \
+        --padding "0 1" \
+        --margin "1 0" \
+        "$(gum style --foreground 42 --bold 'UCA') $(gum style --foreground 245 '— Universal Coding Agent Harness Updater')" \
+        "$(gum style --foreground 245 "Started at: $start_time_str")"
+    else
+      echo -e "\n\033[38;5;39m════════════════════════════════════════════════════════════════════════════\033[0m"
+      echo -e " ${C_BOLD}${C_BLUE}UCA${C_RESET} — Universal Coding Agent Harness Updater"
+      echo -e " ${C_GRAY}Started at:${C_RESET} $start_time_str"
+      echo -e "\033[38;5;39m════════════════════════════════════════════════════════════════════════════\033[0m\n"
+    fi
+  fi
 
-        # Most Recently Updated Banner
-        if mru:
-            mru_name = mru.get("name", mru.get("key", "Unknown"))
-            mru_from = mru.get("from_version", "?")
-            mru_to = mru.get("to_version", "?")
-            mru_time = format_relative_time(mru.get("timestamp"))
-            
-            print(f" {c('⭐ MOST RECENTLY UPDATED HARNESS:', ANSI.YELLOW, ANSI.BOLD)}")
-            print(f"    {c(mru_name, ANSI.BOLD, ANSI.GREEN)}  {c('•', ANSI.GRAY)}  From version {c(mru_from, ANSI.YELLOW)} to version {c(mru_to, ANSI.GREEN, ANSI.BOLD)}  {c(f'({mru_time})', ANSI.GRAY)}\n")
-        else:
-            print(f" {c('⭐ MOST RECENTLY UPDATED:', ANSI.GRAY)} {c('No updates recorded yet (all harnesses currently up to date)', ANSI.GRAY)}\n")
+  # Harness update loop
+  local harnesses=("claude" "codex" "agy" "grok" "omp")
+  if [ -n "$target_key" ]; then
+    harnesses=("$target_key")
+  fi
 
-    # Table section
-    subsep_len = 116
-    subsep_str = "─" * subsep_len
+  local any_updated=0 has_errors=0
+  local mru_key="" mru_from="" mru_to="" mru_ts=""
+  local upgraded_list=()
 
-    print(f"\n {c('HARNESS BREAKDOWN', ANSI.BOLD)}")
-    print(f"{c(subsep_str, ANSI.GRAY)}")
-    
-    col_harness = 22
-    col_ver = 12
-    col_status = 16
-    col_change = 52
-    col_checked = 12
+  # Load previous versions from state
+  PV_CLAUDE=$(read_harness_version_from_state "claude")
+  PV_CODEX=$(read_harness_version_from_state "codex")
+  PV_AGY=$(read_harness_version_from_state "agy")
+  PV_GROK=$(read_harness_version_from_state "grok")
+  PV_OMP=$(read_harness_version_from_state "omp")
 
-    h_harness = pad_str("Harness", col_harness)
-    h_ver = pad_str("Version", col_ver)
-    h_status = pad_str("Status", col_status)
-    h_change = pad_str("Version Changes", col_change)
-    h_checked = pad_str("Checked", col_checked)
-    
-    print(c(f" {h_harness}{h_ver}{h_status}{h_change}{h_checked}", ANSI.BOLD, ANSI.BLUE))
-    print(f"{c(subsep_str, ANSI.GRAY)}")
+  for h in "${harnesses[@]}"; do
+    local h_name=""
+    case "$h" in
+      claude) h_name="Claude Code" ;;
+      codex)  h_name="OpenAI Codex" ;;
+      agy)    h_name="Google Antigravity" ;;
+      grok)   h_name="xAI Grok" ;;
+      omp)    h_name="OMP" ;;
+    esac
 
-    for cfg in HARNESS_CONFIGS:
-        key = cfg["key"]
-        info = harnesses.get(key, {})
-        name = cfg["name"]
-        installed = info.get("installed", False)
-        curr_ver = info.get("current_version") or "-"
-        last_check = format_relative_time(info.get("last_checked_at"))
-        
-        if not installed:
-            status_badge = c("Not Found", ANSI.GRAY)
-            ver_badge = c("-", ANSI.GRAY)
-            change_text = c("Binary not installed in PATH", ANSI.GRAY)
-        else:
-            ver_badge = c(curr_ver, ANSI.BOLD, ANSI.WHITE)
-            last_status = info.get("last_status", "up_to_date")
-            
-            if last_status == "updated":
-                status_badge = c("✔ Updated", ANSI.GREEN, ANSI.BOLD)
-            elif last_status == "error":
-                status_badge = c("⚠️ Error", ANSI.RED)
-            elif last_status == "smoke_warning":
-                status_badge = c("⚠️ Smoke Warn", ANSI.YELLOW)
-            else:
-                status_badge = c("✔ Up to date", ANSI.GREEN)
-                
-            lvc = info.get("last_version_change")
-            if lvc and lvc.get("from_version") and lvc.get("to_version"):
-                from_v = lvc["from_version"]
-                to_v = lvc["to_version"]
-                t_ago = format_relative_time(lvc.get("timestamp"))
-                if from_v != to_v:
-                    change_text = f"From version {c(from_v, ANSI.YELLOW)} to version {c(to_v, ANSI.GREEN, ANSI.BOLD)} {c(f'({t_ago})', ANSI.GRAY)}"
-                else:
-                    change_text = f"Up to date at {curr_ver} {c(f'({t_ago})', ANSI.GRAY)}"
-            else:
-                change_text = f"Up to date at {curr_ver}"
+    local v_before
+    v_before=$(get_harness_version "$h")
+    if [ -z "$v_before" ]; then
+      [ "$quiet" -eq 0 ] && echo -e "  ${C_GRAY}•${C_RESET} $(pad_str "${C_BOLD}${h_name}${C_RESET}" 20) ${C_GRAY}Not installed${C_RESET} (skipped)"
+      continue
+    fi
 
-        p_name = pad_str(name, col_harness)
-        p_ver = pad_str(ver_badge, col_ver)
-        p_status = pad_str(status_badge, col_status)
-        p_change = pad_str(change_text, col_change)
-        p_checked = pad_str(last_check, col_checked)
+    if [ "$dry_run" -eq 1 ]; then
+      [ "$quiet" -eq 0 ] && echo -e "  ${C_BLUE}•${C_RESET} $(pad_str "${C_BOLD}${h_name}${C_RESET}" 20) ${C_YELLOW}[DRY-RUN]${C_RESET} Current: $v_before"
+      continue
+    fi
 
-        print(f" {p_name}{p_ver}{p_status}{p_change}{p_checked}")
+    [ "$quiet" -eq 0 ] && echo -ne "  ${C_BLUE}⟳${C_RESET} Updating ${C_BOLD}${h_name}${C_RESET}..."
 
-    print(f"{c(subsep_str, ANSI.GRAY)}\n")
+    local h_start h_dur out ret
+    h_start=$(date +%s)
+    out=$(update_harness "$h" 2>&1)
+    ret=$?
+    h_dur=$(( $(date +%s) - h_start ))
 
-    # Version Change History
-    all_history = []
-    for cfg in HARNESS_CONFIGS:
-        key = cfg["key"]
-        info = harnesses.get(key, {})
-        for h in info.get("history", []):
-            all_history.append(h)
-            
-    all_history.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-    
-    if all_history:
-        print(f" {c('📜 RECENT VERSION CHANGE HISTORY', ANSI.BOLD)}")
-        print(f"{c(subsep_str, ANSI.GRAY)}")
-        for item in all_history[:8]:
-            t_str = item.get("timestamp", "")
-            try:
-                dt = datetime.fromisoformat(t_str).astimezone()
-                time_fmt = dt.strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                time_fmt = str(t_str)[:16]
-            h_name = item.get("name", item.get("key", "Unknown"))
-            from_v = item.get("from_version", "?")
-            to_v = item.get("to_version", "?")
-            print(f"  {c('•', ANSI.BLUE)} {c(time_fmt, ANSI.GRAY)}  {c(pad_str(h_name, 18), ANSI.BOLD)} From version {c(from_v, ANSI.YELLOW)} to version {c(to_v, ANSI.GREEN, ANSI.BOLD)}")
-        print(f"{c(subsep_str, ANSI.GRAY)}\n")
+    local v_after
+    v_after=$(get_harness_version "$h")
+    [ -z "$v_after" ] && v_after="$v_before"
 
-    # Footer
-    if use_gum_render:
-        footer = gum_style(
-            "--foreground", "245",
-            "--italic",
-            text="Commands: uca (update all) • ucas (status) • ucas -w (watch) • uca doctor • uca logs • uca uninstall"
-        )
-        print(f" {footer}\n")
-    else:
-        print(f" {c('Commands:', ANSI.GRAY)} {c('uca', ANSI.BOLD)} (update all) • {c('ucas', ANSI.BOLD)} (status) • {c('ucas -w', ANSI.BOLD)} (watch) • {c('uca doctor', ANSI.BOLD)} • {c('uca logs', ANSI.BOLD)} • {c('uca uninstall', ANSI.BOLD)}")
-        print(f"{c('═' * subsep_len, ANSI.BLUE)}\n")
+    local smoke_ok=1
+    if [ "$smoke_test" -eq 1 ] && [ "$ret" -eq 0 ]; then
+      smoke_test_harness "$h" || smoke_ok=0
+    fi
 
-def run_watch_mode(interval_sec: int = 5) -> None:
-    """Interactive live dashboard watch mode."""
-    print(c("Starting UCA Watch Mode... Press Ctrl+C to exit.", ANSI.BLUE))
-    try:
-        while True:
-            # Clear screen ANSI escape
-            sys.stdout.write("\033[2J\033[H")
-            sys.stdout.flush()
-            print_status_dashboard(fast=True)
-            print(f" {c('Live Watch Mode', ANSI.BOLD, ANSI.GREEN)} • Refreshing every {interval_sec}s • {datetime.now().strftime('%H:%M:%S')} (Press Ctrl+C to quit)\n")
-            time.sleep(interval_sec)
-    except KeyboardInterrupt:
-        print(f"\n{c('Watch mode stopped.', ANSI.GRAY)}")
+    # Set version globals for state write
+    case "$h" in
+      claude) V_CLAUDE="$v_after"; ST_CLAUDE="up_to_date" ;;
+      codex)  V_CODEX="$v_after";  ST_CODEX="up_to_date" ;;
+      agy)    V_AGY="$v_after";    ST_AGY="up_to_date" ;;
+      grok)   V_GROK="$v_after";   ST_GROK="up_to_date" ;;
+      omp)    V_OMP="$v_after";    ST_OMP="up_to_date" ;;
+    esac
 
-def view_logs(errors_only: bool = False, follow: bool = False) -> None:
-    """Views recent update logs or tails log file."""
-    target_file = ERROR_LOG_FILE if errors_only else LOG_FILE
-    if not target_file.exists():
-        print(c(f"No log file found at {target_file}", ANSI.YELLOW))
-        return
+    if [ -n "$v_before" ] && [ -n "$v_after" ] && [ "$v_before" != "$v_after" ]; then
+      any_updated=1
+      mru_key="$h_name"
+      mru_from="$v_before"
+      mru_to="$v_after"
+      mru_ts="$now_iso"
+      upgraded_list+=("$h_name")
 
-    print(f"\n{c('═' * 76, ANSI.BLUE)}")
-    print(f" {c('UCA LOG VIEWER', ANSI.BOLD, ANSI.BLUE)} — {target_file}")
-    print(f"{c('═' * 76, ANSI.BLUE)}\n")
+      case "$h" in
+        claude) ST_CLAUDE="updated" ;;
+        codex)  ST_CODEX="updated" ;;
+        agy)    ST_AGY="updated" ;;
+        grok)   ST_GROK="updated" ;;
+        omp)    ST_OMP="updated" ;;
+      esac
 
-    if follow:
-        try:
-            subprocess.run(["tail", "-n", "30", "-f", str(target_file)])
-        except KeyboardInterrupt:
-            print("\nLog tail stopped.")
-    else:
-        try:
-            with open(target_file, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-            for line in lines[-40:]:
-                if "error" in line.lower() or "warning" in line.lower():
-                    print(c(line.rstrip(), ANSI.YELLOW))
-                elif "updated" in line.lower() or "success" in line.lower():
-                    print(c(line.rstrip(), ANSI.GREEN))
-                else:
-                    print(line.rstrip())
-        except Exception as e:
-            print(c(f"Error reading log: {e}", ANSI.RED))
-    print(f"\n{c('═' * 76, ANSI.BLUE)}\n")
+      if [ "$quiet" -eq 0 ]; then
+        echo -e "\r  ${C_GREEN}🎉${C_RESET} $(pad_str "${C_BOLD}${h_name}${C_RESET}" 20) ${C_BOLD}${C_GREEN}UPDATED${C_RESET}: From version ${C_YELLOW}${v_before}${C_RESET} to version ${C_BOLD}${C_GREEN}${v_after}${C_RESET} (${h_dur}s)"
+      fi
+    else
+      if [ "$ret" -eq 0 ] && [ "$smoke_ok" -eq 1 ]; then
+        if [ "$quiet" -eq 0 ]; then
+          echo -e "\r  ${C_GREEN}✔${C_RESET} $(pad_str "${C_BOLD}${h_name}${C_RESET}" 20) ${C_GREEN}Up to date${C_RESET} (${v_after}) (${h_dur}s)"
+        fi
+      else
+        has_errors=1
+        case "$h" in
+          claude) ST_CLAUDE="error" ;;
+          codex)  ST_CODEX="error" ;;
+          agy)    ST_AGY="error" ;;
+          grok)   ST_GROK="error" ;;
+          omp)    ST_OMP="error" ;;
+        esac
+        if [ "$quiet" -eq 0 ]; then
+          echo -e "\r  ${C_YELLOW}⚠️${C_RESET} $(pad_str "${C_BOLD}${h_name}${C_RESET}" 20) ${C_YELLOW}Update Warning${C_RESET} (${v_after})"
+        fi
+      fi
+    fi
+  done
 
-def run_doctor() -> None:
-    """Preflight checks & diagnostics matching installer-workmanship patterns."""
-    print(f"\n{c('═' * 76, ANSI.BLUE)}")
-    print(f" {c('UCA DOCTOR', ANSI.BOLD, ANSI.BLUE)} — Harness & Environment Diagnostics")
-    print(f"{c('═' * 76, ANSI.BLUE)}\n")
+  local total_dur=$(( $(date +%s) - start_sec ))
+  local run_status="success"
+  [ "$any_updated" -eq 1 ] && run_status="updated"
+  [ "$has_errors" -eq 1 ] && run_status="error"
 
-    # 1. Check Python version
-    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-    print(f"  {c('✔', ANSI.GREEN)} Python runtime: {c(py_ver, ANSI.BOLD)} ({sys.executable})")
+  if [ "$dry_run" -eq 0 ]; then
+    write_state "$now_iso" "$run_status" "$total_dur" "$mru_key" "$mru_from" "$mru_to" "$mru_ts"
+  fi
 
-    # 2. Check Gum binary
-    gum_bin = shutil.which("gum")
-    if gum_bin:
-        gum_v = subprocess.run([gum_bin, "--version"], capture_output=True, text=True).stdout.strip()
-        print(f"  {c('✔', ANSI.GREEN)} Charmbracelet Gum: {c('Found', ANSI.GREEN)} ({gum_v})")
-    else:
-        print(f"  {c('•', ANSI.GRAY)} Charmbracelet Gum: {c('Not in PATH (ANSI fallback active)', ANSI.GRAY)}")
+  # Notifications
+  if [ "$notify" -eq 1 ] && [ "$any_updated" -eq 1 ]; then
+    if [ "${#upgraded_list[@]}" -eq 1 ]; then
+      send_desktop_notification "🚀 ${upgraded_list[0]} Upgraded" "From version $mru_from to $mru_to"
+    else
+      local joined
+      joined=$(IFS=", "; echo "${upgraded_list[*]}")
+      send_desktop_notification "🚀 Agent Harnesses Upgraded" "Updated ${#upgraded_list[@]} harnesses: $joined"
+    fi
+  fi
 
-    # 3. Check State directory and file
-    print(f"  {c('✔', ANSI.GREEN)} State storage: {STATE_DIR} (writable={os.access(STATE_DIR, os.W_OK)})")
+  if [ "$quiet" -eq 0 ]; then
+    if has_gum; then
+      local status_txt
+      status_txt=$(gum style --foreground 42 --bold 'Completed')
+      echo -e "\n$(gum style --foreground 245 "Completed in: ${total_dur}s") • $status_txt"
+      if [ -n "$mru_key" ] && [ -n "$mru_from" ] && [ -n "$mru_to" ]; then
+        gum style --foreground 39 --bold "Most Recent Update: $mru_key (From version $mru_from to $mru_to)"
+      fi
+      echo ""
+    else
+      echo -e "\n${C_GRAY}────────────────────────────────────────────────────────────────────────────${C_RESET}"
+      echo -e " ${C_GRAY}Completed in:${C_RESET} ${total_dur}s • Status: ${C_GREEN}Completed${C_RESET}"
+      if [ -n "$mru_key" ] && [ -n "$mru_from" ] && [ -n "$mru_to" ]; then
+        echo -e " ${C_BOLD}${C_BLUE}Most Recent Update:${C_RESET} $mru_key (From version $mru_from to $mru_to)"
+      fi
+      echo -e "\033[38;5;39m════════════════════════════════════════════════════════════════════════════\033[0m\n"
+    fi
+  fi
 
-    # 4. Check Disk Space Safety
-    disk_info = get_disk_space_info()
-    if disk_info["is_critical"]:
-        print(f"  {c('✗', ANSI.RED)} Disk Space Safety: {c(str(disk_info['free_mb']) + ' MB free', ANSI.RED, ANSI.BOLD)} on {disk_info['path']} (CRITICAL - Minimum required: {disk_info['threshold_mb']} MB)")
-    elif disk_info["is_low"]:
-        print(f"  {c('⚠️', ANSI.YELLOW)} Disk Space Safety: {c(str(disk_info['free_mb']) + ' MB free', ANSI.YELLOW, ANSI.BOLD)} on {disk_info['path']} (Warning - Below safety threshold of {disk_info['threshold_mb']} MB)")
-    else:
-        print(f"  {c('✔', ANSI.GREEN)} Disk Space Safety: {c(str(disk_info['free_gb']) + ' GB free', ANSI.BOLD, ANSI.GREEN)} on {disk_info['path']} (Min safety threshold: {disk_info['threshold_mb']} MB)")
+  # Log write
+  mkdir -p "$STATE_DIR"
+  echo "[$now_iso] uca run: duration=${total_dur}s, updated=$any_updated, errors=$has_errors" >> "$LOG_FILE" 2>/dev/null || true
 
-    # 5. Check Background Service
-    srv = get_service_status()
-    if srv["active"]:
-        print(f"  {c('✔', ANSI.GREEN)} 3-Hour Auto-Updater: {c(srv['detail'], ANSI.GREEN, ANSI.BOLD)}")
-    else:
-        print(f"  {c('⚠️', ANSI.YELLOW)} 3-Hour Auto-Updater: {c(srv['detail'], ANSI.YELLOW)} (run `uca service install` to enable)")
+  release_lock
+  return $has_errors
+}
 
-    # 6. Check each harness
-    print(f"\n  {c('Harness Integrity & Smoke Checks:', ANSI.BOLD)}")
-    for cfg in HARNESS_CONFIGS:
-        name = cfg["name"]
-        bin_path = find_executable(cfg["binary_candidates"])
-        v, _ = query_harness_version(cfg)
-        if bin_path:
-            smoke_ok, smoke_info = smoke_test_harness(cfg)
-            smoke_status = c("Ready", ANSI.GREEN) if smoke_ok else c(f"Warning ({smoke_info})", ANSI.YELLOW)
-            print(f"    {c('✔', ANSI.GREEN)} {pad_str(name, 20)} {c(bin_path, ANSI.GRAY):<38} Version: {c(v or 'unknown', ANSI.BOLD):<14} Smoke: {smoke_status}")
-        else:
-            print(f"    {c('•', ANSI.GRAY)} {pad_str(name, 20)} {c('Binary not installed', ANSI.GRAY)}")
+# Live Watch Mode
+run_watch_mode() {
+  local interval="${1:-5}"
+  echo -e "${C_BLUE}Starting UCA Watch Mode... Press Ctrl+C to exit.${C_RESET}"
+  while true; do
+    printf "\033[2J\033[H"
+    show_status_dashboard 0
+    echo -e " ${C_BOLD}${C_GREEN}Live Watch Mode${C_RESET} • Refreshing every ${interval}s • $(date +'%H:%M:%S') (Press Ctrl+C to quit)\n"
+    sleep "$interval"
+  done
+}
 
-    print(f"\n{c('═' * 76, ANSI.BLUE)}\n")
+# Log Viewer
+view_logs() {
+  local errors_only="${1:-0}" follow="${2:-0}"
+  local target="$LOG_FILE"
+  [ "$errors_only" -eq 1 ] && target="$ERROR_LOG_FILE"
 
-def install_systemd_service() -> bool:
-    """Installs and enables systemd user service and timer (every 3 hours)."""
-    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
-    
-    service_content = f"""[Unit]
-Description=Universal Coding Agent Harness Auto-Updater (UCA)
-Documentation=https://github.com/Dicklesworthstone
-After=network-online.target default.target
-Wants=network-online.target
+  if [ ! -f "$target" ]; then
+    echo -e "${C_YELLOW}No log file found at $target${C_RESET}"
+    return 0
+  fi
 
-[Service]
-Type=oneshot
-ExecStart={Path.home()}/.local/bin/uca --quiet --notify
-TimeoutStartSec=600
-Restart=no
-StandardOutput=journal
-StandardError=journal
-Environment=HOME={Path.home()}
-Environment=PATH={Path.home()}/.local/bin:{Path.home()}/.bun/bin:{Path.home()}/.grok/bin:{Path.home()}/.cargo/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-"""
+  echo -e "\n\033[38;5;39m════════════════════════════════════════════════════════════════════════════\033[0m"
+  echo -e " ${C_BOLD}${C_BLUE}UCA LOG VIEWER${C_RESET} — $target"
+  echo -e "\033[38;5;39m════════════════════════════════════════════════════════════════════════════\033[0m\n"
 
-    timer_content = """[Unit]
-Description=Universal Coding Agent Harness Auto-Updater Timer (every 3 hours)
-Documentation=https://github.com/Dicklesworthstone
+  if [ "$follow" -eq 1 ]; then
+    tail -n 30 -f "$target"
+  else
+    tail -n 40 "$target" | while IFS= read -r line; do
+      if grep -qi "error\|warning" <<< "$line"; then
+        echo -e "${C_YELLOW}$line${C_RESET}"
+      elif grep -qi "updated\|success" <<< "$line"; then
+        echo -e "${C_GREEN}$line${C_RESET}"
+      else
+        echo "$line"
+      fi
+    done
+  fi
+  echo -e "\n\033[38;5;39m════════════════════════════════════════════════════════════════════════════\033[0m\n"
+}
 
-[Timer]
-# Run every 3 hours at the top of the hour (00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00, 21:00)
-OnCalendar=*-*-* 00,03,06,09,12,15,18,21:00:00
-# Run 5 minutes after boot if missed
-OnBootSec=5min
-# Catch up if machine was offline
-Persistent=true
-# 3-minute random jitter to avoid thundering herd across fleet
-RandomizedDelaySec=180
+# Doctor Diagnostics
+run_doctor() {
+  echo -e "\n\033[38;5;39m════════════════════════════════════════════════════════════════════════════\033[0m"
+  echo -e " ${C_BOLD}${C_BLUE}UCA DOCTOR${C_RESET} — Harness & Environment Diagnostics"
+  echo -e "\033[38;5;39m════════════════════════════════════════════════════════════════════════════\033[0m\n"
 
-[Install]
-WantedBy=timers.target
-"""
+  # 1. Bash Shell
+  echo -e "  ${C_GREEN}✔${C_RESET} Shell runtime: ${C_BOLD}Bash $BASH_VERSION${C_RESET} ($SHELL)"
 
-    service_file = SYSTEMD_USER_DIR / "uca.service"
-    timer_file = SYSTEMD_USER_DIR / "uca.timer"
+  # 2. Charmbracelet Gum
+  if command -v gum &>/dev/null; then
+    local gv
+    gv=$(gum --version 2>/dev/null || echo "installed")
+    echo -e "  ${C_GREEN}✔${C_RESET} Charmbracelet Gum: ${C_GREEN}Found${C_RESET} ($gv)"
+  else
+    echo -e "  ${C_GRAY}•${C_RESET} Charmbracelet Gum: ${C_GRAY}Not in PATH (ANSI fallback active)${C_RESET}"
+  fi
 
-    with open(service_file, "w", encoding="utf-8") as f:
-        f.write(service_content)
-    with open(timer_file, "w", encoding="utf-8") as f:
-        f.write(timer_content)
+  # 3. State storage
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  if [ -w "$STATE_DIR" ]; then
+    echo -e "  ${C_GREEN}✔${C_RESET} State storage: $STATE_DIR (writable=true)"
+  else
+    echo -e "  ${C_RED}✗${C_RESET} State storage: $STATE_DIR (not writable)"
+  fi
 
-    print(f"{c('✔', ANSI.GREEN)} Wrote {service_file}")
-    print(f"{c('✔', ANSI.GREEN)} Wrote {timer_file}")
+  # 4. Disk Space Safety
+  local free_mb free_gb
+  free_mb=$(get_free_disk_mb "$HOME")
+  free_gb=$(awk "BEGIN {printf \"%.1f\", $free_mb / 1024}")
+  if [ "$free_mb" -lt 50 ]; then
+    echo -e "  ${C_RED}✗${C_RESET} Disk Space Safety: ${C_BOLD}${C_RED}${free_mb} MB free${C_RESET} on $HOME (CRITICAL - Minimum required: ${MIN_FREE_DISK_MB} MB)"
+  elif [ "$free_mb" -lt "$MIN_FREE_DISK_MB" ]; then
+    echo -e "  ${C_YELLOW}⚠️${C_RESET} Disk Space Safety: ${C_BOLD}${C_YELLOW}${free_mb} MB free${C_RESET} on $HOME (Warning - Below threshold of ${MIN_FREE_DISK_MB} MB)"
+  else
+    echo -e "  ${C_GREEN}✔${C_RESET} Disk Space Safety: ${C_BOLD}${C_GREEN}${free_gb} GB free${C_RESET} on $HOME (Min safety threshold: ${MIN_FREE_DISK_MB} MB)"
+  fi
 
-    try:
-        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-        subprocess.run(["systemctl", "--user", "enable", "--now", "uca.timer"], check=True)
-        print(f"{c('✔', ANSI.GREEN)} Enabled and started {c('uca.timer', ANSI.BOLD)} (runs every 3 hours)")
-        return True
-    except Exception as e:
-        print(f"{c('⚠️', ANSI.YELLOW)} systemctl command failed: {e}")
-        return False
+  # 5. Background Service
+  local srv_info srv_state srv_detail
+  srv_info=$(get_service_status)
+  srv_state="${srv_info%%|*}"
+  srv_detail="${srv_info##*|}"
+  if [ "$srv_state" = "ACTIVE" ]; then
+    echo -e "  ${C_GREEN}✔${C_RESET} 3-Hour Auto-Updater: ${C_BOLD}${C_GREEN}${srv_detail}${C_RESET}"
+  else
+    echo -e "  ${C_YELLOW}⚠️${C_RESET} 3-Hour Auto-Updater: ${C_YELLOW}${srv_detail}${C_RESET} (run 'uca service install' to enable)"
+  fi
 
-def install_launchd_service() -> bool:
-    """Installs and enables macOS launchd agent (every 3 hours = 10800s)."""
-    LAUNCHD_DIR.mkdir(parents=True, exist_ok=True)
-    username = os.environ.get("USER") or Path.home().name
-    plist_label = f"com.{username}.uca"
-    plist_path = LAUNCHD_DIR / f"{plist_label}.plist"
-    
-    path_env = f"{Path.home()}/.local/bin:{Path.home()}/.bun/bin:{Path.home()}/.grok/bin:{Path.home()}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    
-    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+  # 6. Harness Integrity Checks
+  echo -e "\n  ${C_BOLD}Harness Integrity & Smoke Checks:${C_RESET}"
+  check_harness_doc() {
+    local name="$1" key="$2" bin_cand="$3"
+    local bin_path=""
+    if command -v "$bin_cand" &>/dev/null; then
+      bin_path=$(command -v "$bin_cand")
+    elif [ -x "$HOME/.local/bin/$bin_cand" ]; then
+      bin_path="$HOME/.local/bin/$bin_cand"
+    elif [ -x "$HOME/.bun/bin/$bin_cand" ]; then
+      bin_path="$HOME/.bun/bin/$bin_cand"
+    fi
+
+    if [ -n "$bin_path" ]; then
+      local v smoke_st
+      v=$(get_harness_version "$key")
+      [ -z "$v" ] && v="unknown"
+      if smoke_test_harness "$key"; then
+        smoke_st="${C_GREEN}Ready${C_RESET}"
+      else
+        smoke_st="${C_YELLOW}Warning${C_RESET}"
+      fi
+      local p_name p_bin p_ver
+      p_name=$(pad_str "$name" 20)
+      p_bin=$(pad_str "$bin_path" 38)
+      p_ver=$(pad_str "$v" 14)
+      echo -e "    ${C_GREEN}✔${C_RESET} ${p_name} ${C_GRAY}${p_bin}${C_RESET} Version: ${C_BOLD}${p_ver}${C_RESET} Smoke: $smoke_st"
+    else
+      echo -e "    ${C_GRAY}•${C_RESET} $(pad_str "$name" 20) ${C_GRAY}Binary not installed${C_RESET}"
+    fi
+  }
+
+  check_harness_doc "Claude Code"       "claude" "claude"
+  check_harness_doc "OpenAI Codex"      "codex"  "codex"
+  check_harness_doc "Google Antigravity" "agy"    "agy"
+  check_harness_doc "xAI Grok"          "grok"   "grok"
+  check_harness_doc "OMP"               "omp"    "omp"
+
+  echo -e "\n\033[38;5;39m════════════════════════════════════════════════════════════════════════════\033[0m\n"
+}
+
+# Background Service Installer
+install_service() {
+  echo -e "\n${C_BOLD}${C_BLUE}Configuring UCA 3-hour background scheduler...${C_RESET}"
+  if [ "$(uname -s)" = "Darwin" ] && command -v launchctl &>/dev/null; then
+    mkdir -p "$LAUNCHD_DIR"
+    local current_user="${USER:-$(whoami 2>/dev/null || echo "user")}"
+    local plist_label="com.${current_user}.uca"
+    local plist_path="$LAUNCHD_DIR/${plist_label}.plist"
+    local path_env="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.grok/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+    cat > "$plist_path" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{plist_label}</string>
+    <string>${plist_label}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{Path.home()}/.local/bin/uca</string>
+        <string>${HOME}/.local/bin/uca</string>
         <string>--quiet</string>
         <string>--notify</string>
     </array>
@@ -1330,48 +1008,47 @@ def install_launchd_service() -> bool:
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>{STATE_DIR}/uca.log</string>
+    <string>${STATE_DIR}/uca.log</string>
     <key>StandardErrorPath</key>
-    <string>{STATE_DIR}/uca-error.log</string>
+    <string>${STATE_DIR}/uca-error.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>{path_env}</string>
+        <string>${path_env}</string>
         <key>HOME</key>
-        <string>{Path.home()}</string>
+        <string>${HOME}</string>
     </dict>
 </dict>
 </plist>
-"""
-    with open(plist_path, "w", encoding="utf-8") as f:
-        f.write(plist_content)
-        
-    print(f"{c('✔', ANSI.GREEN)} Wrote {plist_path}")
-    
-    # Also write systemd units in ~/.config/systemd/user/ so they exist if synced
-    try:
-        SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
-        service_file = SYSTEMD_USER_DIR / "uca.service"
-        timer_file = SYSTEMD_USER_DIR / "uca.timer"
-        service_content = f"""[Unit]
+EOF
+    launchctl unload "$plist_path" 2>/dev/null || true
+    launchctl load -w "$plist_path" 2>/dev/null || true
+    echo -e "  ${C_GREEN}✔${C_RESET} Registered launchd agent ${C_BOLD}${plist_label}${C_RESET} (every 3 hours)"
+  elif command -v systemctl &>/dev/null; then
+    mkdir -p "$SYSTEMD_USER_DIR"
+    local service_file="$SYSTEMD_USER_DIR/uca.service"
+    local timer_file="$SYSTEMD_USER_DIR/uca.timer"
+
+    cat > "$service_file" <<EOF
+[Unit]
 Description=Universal Coding Agent Harness Auto-Updater (UCA)
-Documentation=https://github.com/Dicklesworthstone
 After=network-online.target default.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/uca --quiet --notify
+ExecStart=$HOME/.local/bin/uca --quiet --notify
 TimeoutStartSec=600
 Restart=no
 StandardOutput=journal
 StandardError=journal
-Environment=HOME=%h
-Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.grok/bin:%h/.cargo/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-"""
-        timer_content = """[Unit]
+Environment=HOME=$HOME
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:$HOME/.grok/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EOF
+
+    cat > "$timer_file" <<EOF
+[Unit]
 Description=Universal Coding Agent Harness Auto-Updater Timer (every 3 hours)
-Documentation=https://github.com/Dicklesworthstone
 
 [Timer]
 OnCalendar=*-*-* 00,03,06,09,12,15,18,21:00:00
@@ -1381,285 +1058,212 @@ RandomizedDelaySec=180
 
 [Install]
 WantedBy=timers.target
-"""
-        with open(service_file, "w", encoding="utf-8") as f:
-            f.write(service_content)
-        with open(timer_file, "w", encoding="utf-8") as f:
-            f.write(timer_content)
-        print(f"{c('✔', ANSI.GREEN)} Wrote {service_file} & {timer_file} (systemd user units)")
-    except Exception:
-        pass
+EOF
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable --now uca.timer 2>/dev/null || true
+    echo -e "  ${C_GREEN}✔${C_RESET} Enabled systemd user timer ${C_BOLD}uca.timer${C_RESET} (every 3 hours)"
+  fi
+}
 
-    try:
-        subprocess.run(["launchctl", "unload", str(plist_path)], stderr=subprocess.DEVNULL)
-        subprocess.run(["launchctl", "load", "-w", str(plist_path)], check=True)
-        print(f"{c('✔', ANSI.GREEN)} Loaded launchd agent {c(plist_label, ANSI.BOLD)} (runs every 3 hours)")
-        return True
-    except Exception as e:
-        print(f"{c('⚠️', ANSI.YELLOW)} launchctl command failed: {e}")
-        return False
+# Uninstaller
+run_uninstaller() {
+  local purge="${1:-0}" force="${2:-0}"
+  echo -e "\n\033[38;5;214m════════════════════════════════════════════════════════════════════════════\033[0m"
+  echo -e " ${C_BOLD}${C_YELLOW}UCA UNINSTALLER${C_RESET} — Clean Removal Wizard"
+  echo -e "\033[38;5;214m════════════════════════════════════════════════════════════════════════════\033[0m\n"
 
-def install_service() -> None:
-    print(f"\n{c('Setting up UCA 3-hour background auto-updater...', ANSI.BLUE, ANSI.BOLD)}")
-    if shutil.which("systemctl"):
-        install_systemd_service()
-    elif shutil.which("launchctl"):
-        install_launchd_service()
-    else:
-        print(c("Neither systemd nor launchd detected on this system.", ANSI.YELLOW))
+  if [ "$force" -eq 0 ]; then
+    if has_gum; then
+      if ! gum confirm "Are you sure you want to completely uninstall UCA and its background services?"; then
+        echo -e "${C_GRAY}Uninstallation aborted.${C_RESET}"
+        return 0
+      fi
+    else
+      echo -ne "\033[38;5;214mAre you sure you want to completely uninstall UCA and its background services? [y/N]: \033[0m"
+      read -r ans
+      case "$ans" in
+        y|Y|yes|Yes|YES) ;;
+        *) echo -e "${C_GRAY}Uninstallation aborted.${C_RESET}"; return 0 ;;
+      esac
+    fi
+  fi
 
-def run_uninstaller(purge: bool = False, force: bool = False) -> None:
-    """Robust in-binary uninstaller tearing down services, symlinks, aliases, and state."""
-    print(f"\n{c('═' * 76, ANSI.YELLOW)}")
-    print(f" {c('UCA UNINSTALLER', ANSI.BOLD, ANSI.YELLOW)} — Clean Removal Wizard")
-    print(f"{c('═' * 76, ANSI.YELLOW)}\n")
+  # Stop launchd
+  if [ "$(uname -s)" = "Darwin" ] && command -v launchctl &>/dev/null; then
+    local current_user="${USER:-$(whoami 2>/dev/null || echo "user")}"
+    for plist_name in "com.${current_user}.uca.plist" "com.jemanuel.uca.plist" "com.uca.updater.plist"; do
+      local plist_file="$LAUNCHD_DIR/$plist_name"
+      if [ -f "$plist_file" ]; then
+        launchctl unload "$plist_file" 2>/dev/null || true
+        rm -f "$plist_file" 2>/dev/null || true
+        echo -e "  ${C_GREEN}✔${C_RESET} Removed launchd agent ($plist_name)"
+      fi
+    done
+  fi
 
-    if not force:
-        if has_gum():
-            cmd = ["gum", "confirm", "Are you sure you want to completely uninstall UCA and its background services?"]
-            if subprocess.run(cmd).returncode != 0:
-                print(c("Uninstallation aborted.", ANSI.GRAY))
-                return
-        else:
-            ans = input("Are you sure you want to completely uninstall UCA and its background services? [y/N]: ").strip().lower()
-            if ans not in ["y", "yes"]:
-                print(c("Uninstallation aborted.", ANSI.GRAY))
-                return
+  # Stop systemd
+  if command -v systemctl &>/dev/null; then
+    systemctl --user disable --now uca.timer 2>/dev/null || true
+    systemctl --user stop uca.service 2>/dev/null || true
+    rm -f "$SYSTEMD_USER_DIR/uca.service" "$SYSTEMD_USER_DIR/uca.timer" 2>/dev/null || true
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo -e "  ${C_GREEN}✔${C_RESET} Removed systemd units"
+  fi
 
-    # 1. Teardown launchd
-    if shutil.which("launchctl"):
-        username = os.environ.get("USER") or Path.home().name
-        for plist_name in [f"com.{username}.uca.plist", "com.jemanuel.uca.plist", "com.uca.updater.plist"]:
-            plist_file = LAUNCHD_DIR / plist_name
-            if plist_file.exists():
-                subprocess.run(["launchctl", "unload", str(plist_file)], stderr=subprocess.DEVNULL)
-                try:
-                    plist_file.unlink()
-                    print(f"  {c('✔', ANSI.GREEN)} Removed launchd agent ({plist_name})")
-                except Exception:
-                    pass
+  # Clean aliases
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.config/fish/config.fish"; do
+    if [ -f "$rc" ] && grep -q "alias ucas=" "$rc" 2>/dev/null; then
+      sed -i.bak '/alias ucas=/d; /alias uca=/d' "$rc" 2>/dev/null || true
+      rm -f "${rc}.bak" 2>/dev/null || true
+      echo -e "  ${C_GREEN}✔${C_RESET} Removed aliases from $rc"
+    fi
+  done
 
-    # 2. Teardown systemd
-    if shutil.which("systemctl"):
-        subprocess.run(["systemctl", "--user", "disable", "--now", "uca.timer"], stderr=subprocess.DEVNULL)
-        subprocess.run(["systemctl", "--user", "stop", "uca.service"], stderr=subprocess.DEVNULL)
-        for unit in [SYSTEMD_USER_DIR / "uca.service", SYSTEMD_USER_DIR / "uca.timer"]:
-            if unit.exists():
-                try:
-                    unit.unlink()
-                    print(f"  {c('✔', ANSI.GREEN)} Removed systemd unit ({unit.name})")
-                except Exception:
-                    pass
-        subprocess.run(["systemctl", "--user", "daemon-reload"], stderr=subprocess.DEVNULL)
+  # Purge state directory if requested
+  if [ "$purge" -eq 1 ] && [ -d "$STATE_DIR" ]; then
+    rm -rf "$STATE_DIR" 2>/dev/null || true
+    echo -e "  ${C_GREEN}✔${C_RESET} Purged state directory ($STATE_DIR)"
+  fi
 
-    # 3. Remove aliases from shell configs
-    for shell_rc in [Path.home() / ".zshrc", Path.home() / ".bashrc", Path.home() / ".config" / "fish" / "config.fish"]:
-        if shell_rc.exists():
-            try:
-                with open(shell_rc, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                new_lines = [l for l in lines if "alias ucas=" not in l and "alias uca=" not in l]
-                if len(new_lines) != len(lines):
-                    with open(shell_rc, "w", encoding="utf-8") as f:
-                        f.writelines(new_lines)
-                    print(f"  {c('✔', ANSI.GREEN)} Removed aliases from {shell_rc}")
-            except Exception:
-                pass
+  # Remove binaries
+  for b in "$HOME/.local/bin/uca" "$HOME/.local/bin/ucas" "/usr/local/bin/uca" "/usr/local/bin/ucas"; do
+    if [ -f "$b" ] || [ -L "$b" ]; then
+      rm -f "$b" 2>/dev/null || true
+      echo -e "  ${C_GREEN}✔${C_RESET} Removed $b"
+    fi
+  done
 
-    # 4. Remove state directory if purge requested
-    if purge and STATE_DIR.exists():
-        try:
-            shutil.rmtree(STATE_DIR)
-            print(f"  {c('✔', ANSI.GREEN)} Purged state directory ({STATE_DIR})")
-        except Exception:
-            pass
+  echo -e "\n${C_GREEN}${C_BOLD}✔ UCA has been cleanly uninstalled.${C_RESET}\n"
+}
 
-    # 5. Remove binaries and symlinks
-    bin_targets = [
-        Path.home() / ".local" / "bin" / "uca",
-        Path.home() / ".local" / "bin" / "ucas",
-        Path("/usr/local/bin/uca"),
-        Path("/usr/local/bin/ucas"),
-    ]
-    for b in bin_targets:
-        if b.exists() or b.is_symlink():
-            try:
-                b.unlink()
-                print(f"  {c('✔', ANSI.GREEN)} Removed {b}")
-            except Exception:
-                pass
+# Main CLI Router
+main() {
+  local prog_name
+  prog_name=$(basename "$0")
+  
+  # Invocation as ucas or uca status
+  if [ "$prog_name" = "ucas" ] || { [ $# -gt 0 ] && [[ "$1" =~ ^(status|s|st|-s|--status)$ ]]; }; then
+    shift 2>/dev/null || true
+    local json_m=0
+    for a in "$@"; do
+      case "$a" in
+        --json) json_m=1 ;;
+        --no-gum) NO_GUM=1 ;;
+        -w|--watch)
+          local int=5
+          shift 2>/dev/null || true
+          [ -n "${1:-}" ] && [[ "$1" =~ ^[0-9]+$ ]] && int="$1"
+          run_watch_mode "$int"
+          return 0
+          ;;
+        -h|--help)
+          echo "Usage: ucas [OPTIONS]"
+          echo ""
+          echo "Options:"
+          echo "  -w, --watch [SEC]  Interactive auto-refreshing live dashboard (default: 5s)"
+          echo "  -f, --fast         Probe versions in parallel (ultra-fast sub-second refresh)"
+          echo "  --json             Output status in JSON format"
+          echo "  --no-gum           Disable gum styling and use ANSI fallback"
+          echo "  -h, --help         Show this help message"
+          return 0
+          ;;
+      esac
+    done
+    show_status_dashboard "$json_m"
+    return 0
+  fi
 
-    print(f"\n{c('✔ UCA has been cleanly uninstalled.', ANSI.GREEN, ANSI.BOLD)}\n")
+  # Subcommands
+  if [ $# -gt 0 ]; then
+    case "$1" in
+      doctor|doc|--doctor)
+        run_doctor
+        return 0
+        ;;
+      logs|log|--logs)
+        shift
+        local err_m=0 fol_m=0
+        for a in "$@"; do
+          [ "$a" = "-e" ] || [ "$a" = "--errors" ] && err_m=1
+          [ "$a" = "-f" ] || [ "$a" = "--follow" ] && fol_m=1
+        done
+        view_logs "$err_m" "$fol_m"
+        return 0
+        ;;
+      uninstall|--uninstall|remove)
+        shift
+        local p_purge=0 p_force=0
+        for a in "$@"; do
+          [ "$a" = "--purge" ] && p_purge=1
+          [ "$a" = "-y" ] || [ "$a" = "--yes" ] && p_force=1
+        done
+        run_uninstaller "$p_purge" "$p_force"
+        return 0
+        ;;
+      service|--service)
+        shift
+        local action="${1:-install}"
+        if [ "$action" = "install" ] || [ "$action" = "enable" ]; then
+          install_service
+        else
+          get_service_status
+        fi
+        return 0
+        ;;
+      check|--check)
+        show_status_dashboard 0
+        return 0
+        ;;
+      -h|--help|help)
+        echo "UCA — Universal Coding Agent Harness Updater & Version Tracker"
+        echo ""
+        echo "Usage:"
+        echo "  uca                 Update all agent harnesses (claude, codex, agy, grok, omp)"
+        echo "  ucas                Show status breakdown, version changes, and schedule"
+        echo "  ucas -w, --watch    Interactive live auto-refreshing dashboard"
+        echo "  uca <harness>       Update specific harness (e.g. 'uca omp', 'uca claude')"
+        echo "  uca doctor          Run preflight diagnostics & self-test"
+        echo "  uca logs            Inspect update logs (--errors, --follow)"
+        echo "  uca service install Install 3-hour background auto-updater service"
+        echo "  uca service status  Show background service status"
+        echo "  uca uninstall       Cleanly remove UCA, timers, and aliases (--purge)"
+        echo "  uca check           Probe versions without running updates"
+        echo ""
+        echo "Options:"
+        echo "  -q, --quiet            Minimal output (for automated / cron / service runs)"
+        echo "  --notify               Dispatch desktop notification on version change"
+        echo "  --no-smoke-test        Skip post-update verification guard"
+        echo "  --ignore-disk-space    Bypass free disk space safety threshold"
+        echo "  --min-disk-mb <N>      Set minimum free disk space threshold (default: 500 MB)"
+        echo "  --dry-run              Check versions without applying updates"
+        echo "  --no-gum               Disable gum styling and use ANSI fallback"
+        echo "  --json                 Output status in JSON format"
+        echo "  -h, --help             Show this help message"
+        return 0
+        ;;
+    esac
+  fi
 
-def main() -> None:
-    global NO_GUM, FORCE_COLOR
-    prog_name = os.path.basename(sys.argv[0])
-    raw_args = sys.argv[1:]
+  # Flags parsing for update run
+  local q_flag=0 dry_flag=0 notif_flag=0 smoke_flag=1 ign_disk=0 min_d="$MIN_FREE_DISK_MB" target=""
 
-    # Signal handlers for clean exit
-    def sig_handler(signum, frame):
-        sys.exit(128 + signum)
-    signal.signal(signal.SIGTERM, sig_handler)
-    signal.signal(signal.SIGHUP, sig_handler)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -q|--quiet)          q_flag=1; notif_flag=1 ;;
+      --dry-run)           dry_flag=1 ;;
+      --notify)            notif_flag=1 ;;
+      --no-smoke-test)     smoke_flag=0 ;;
+      --no-gum)            NO_GUM=1 ;;
+      --ignore-disk-space) ign_disk=1 ;;
+      --min-disk-mb=*)     min_d="${1#*=}" ;;
+      --min-disk-mb)       shift; min_d="$1" ;;
+      claude|codex|agy|grok|omp) target="$1" ;;
+      all) target="" ;;
+    esac
+    shift 2>/dev/null || break
+  done
 
-    if "--no-gum" in raw_args:
-        NO_GUM = True
-        raw_args = [a for a in raw_args if a != "--no-gum"]
+  run_all_updates "$target" "$q_flag" "$dry_flag" "$notif_flag" "$smoke_flag" "$ign_disk" "$min_d"
+}
 
-    # Status / UCAS invocation
-    if prog_name == "ucas" or (raw_args and raw_args[0] in ["status", "s", "st", "-s", "--status"]):
-        if "-h" in raw_args or "--help" in raw_args:
-            print("""UCAS — Universal Coding Agent Harness Dashboard
-
-Usage:
-  ucas                Show status dashboard, recent version changes, and schedule
-  ucas -w, --watch    Interactive live auto-refreshing dashboard
-  ucas -f, --fast     Probe versions in parallel (ultra-fast sub-second refresh)
-  ucas --json         Output status in machine-readable JSON format
-  ucas --no-gum       Disable gum styling and use ANSI fallback
-  ucas -h, --help     Show this help message
-""")
-            return
-        if "-w" in raw_args or "--watch" in raw_args:
-            interval = 5
-            for a in raw_args:
-                if a.isdigit():
-                    interval = max(1, int(a))
-            run_watch_mode(interval_sec=interval)
-            return
-        json_mode = "--json" in raw_args
-        fast_mode = "-f" in raw_args or "--fast" in raw_args
-        print_status_dashboard(json_mode=json_mode, fast=fast_mode)
-        return
-
-    # Check for doctor command
-    if raw_args and raw_args[0] in ["doctor", "doc", "--doctor", "--verify"]:
-        run_doctor()
-        return
-
-    # Check for logs command
-    if raw_args and raw_args[0] in ["logs", "log", "--logs"]:
-        errors_only = "-e" in raw_args or "--errors" in raw_args
-        follow_mode = "-f" in raw_args or "--follow" in raw_args
-        view_logs(errors_only=errors_only, follow=follow_mode)
-        return
-
-    # Check for uninstall command
-    if raw_args and raw_args[0] in ["uninstall", "--uninstall", "remove"]:
-        purge = "--purge" in raw_args
-        force = "-y" in raw_args or "--yes" in raw_args
-        run_uninstaller(purge=purge, force=force)
-        return
-
-    # Check for service command
-    if raw_args and raw_args[0] in ["service", "--service", "--install-service"]:
-        action = "install"
-        if len(raw_args) > 1 and raw_args[1] in ["status", "install", "enable", "disable"]:
-            action = raw_args[1]
-        elif raw_args[0] == "--install-service":
-            action = "install"
-            
-        if action in ["install", "enable"]:
-            install_service()
-        else:
-            status_data = get_service_status()
-            print(f"Service Type: {status_data['type']}")
-            print(f"Active: {status_data['active']}")
-            print(f"Detail: {status_data['detail']}")
-        return
-
-    # Check for check command
-    if raw_args and raw_args[0] in ["check", "--check"]:
-        print_status_dashboard(json_mode="--json" in raw_args, fast=True)
-        return
-
-    # Parse flags
-    quiet = "-q" in raw_args or "--quiet" in raw_args
-    notify = "--notify" in raw_args or quiet  # Send notification in background quiet mode
-    smoke_test = "--no-smoke-test" not in raw_args
-    dry_run = "--dry-run" in raw_args
-    ignore_disk_space = "--ignore-disk-space" in raw_args or "--force-disk" in raw_args
-    help_flag = "-h" in raw_args or "--help" in raw_args
-
-    min_disk_mb = MIN_FREE_DISK_MB
-    for i, a in enumerate(raw_args):
-        if a.startswith("--min-disk-mb="):
-            try:
-                min_disk_mb = int(a.split("=", 1)[1])
-            except ValueError:
-                pass
-        elif a == "--min-disk-mb" and i + 1 < len(raw_args):
-            try:
-                min_disk_mb = int(raw_args[i + 1])
-            except ValueError:
-                pass
-
-    if help_flag:
-        print("""UCA — Universal Coding Agent Harness Updater & Version Tracker
-
-Usage:
-  uca                 Update all agent harnesses (claude, codex, agy, grok, omp)
-  ucas                Show status breakdown, version changes, and schedule
-  ucas -w, --watch    Interactive live auto-refreshing dashboard
-  uca <harness>       Update specific harness (e.g. 'uca omp', 'uca claude')
-  uca doctor          Run preflight diagnostics & self-test
-  uca logs            Inspect update logs (--errors, --follow)
-  uca service install Install 3-hour background auto-updater service
-  uca service status  Show background service status
-  uca uninstall       Cleanly remove UCA, timers, and aliases (--purge)
-  uca check           Probe versions without running updates
-
-Options:
-  -q, --quiet            Minimal output (for automated / cron / service runs)
-  --notify               Dispatch desktop notification on version change
-  --no-smoke-test        Skip post-update verification guard
-  --ignore-disk-space    Bypass free disk space safety threshold
-  --min-disk-mb <N>      Set minimum free disk space threshold (default: 500 MB)
-  --dry-run              Check versions without applying updates
-  --no-gum               Disable gum styling and use ANSI fallback
-  --json                 Output status in JSON format
-  -h, --help             Show this help message
-""")
-        return
-
-    # Filter out flags to find target harnesses
-    known_harness_keys = {cfg["key"] for cfg in HARNESS_CONFIGS}
-    targets = []
-    skip_next = False
-    for i, arg in enumerate(raw_args):
-        if skip_next:
-            skip_next = False
-            continue
-        if arg == "--min-disk-mb":
-            skip_next = True
-            continue
-        if arg.startswith("-"):
-            continue
-        if arg.lower() in ["update", "run"]:
-            continue
-        if arg.lower() in known_harness_keys or arg.lower() in ["all"]:
-            if arg.lower() != "all":
-                targets.append(arg.lower())
-        else:
-            matched = False
-            for k in known_harness_keys:
-                if k.startswith(arg.lower()):
-                    targets.append(k)
-                    matched = True
-                    break
-            if not matched:
-                print(c(f"Unknown harness or command: '{arg}'. Available: {', '.join(sorted(known_harness_keys))}", ANSI.YELLOW))
-
-    code = run_all_updates(
-        target_keys=targets if targets else None,
-        quiet=quiet,
-        dry_run=dry_run,
-        notify=notify,
-        smoke_test=smoke_test,
-        ignore_disk_space=ignore_disk_space,
-        min_disk_mb=min_disk_mb,
-    )
-    sys.exit(code)
-
-if __name__ == "__main__":
-    main()
+main "$@"

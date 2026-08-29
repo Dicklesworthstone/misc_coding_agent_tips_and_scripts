@@ -284,14 +284,12 @@ fi
 preflight_checks() {
   info "Running preflight checks..."
   
-  # Check Python 3
-  if ! command -v python3 &>/dev/null; then
-    err "Python 3 is required but was not found in PATH."
+  # Check Bash runtime
+  if [ -z "${BASH_VERSION:-}" ]; then
+    err "Bash is required to run UCA."
     exit 1
   fi
-  local py_ver
-  py_ver=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0.0")
-  ok "Python 3 detected (v$py_ver)"
+  ok "Bash runtime detected (v${BASH_VERSION%%(.*})"
 
   # Check write permissions
   if [ "$DRY_RUN" -eq 0 ]; then

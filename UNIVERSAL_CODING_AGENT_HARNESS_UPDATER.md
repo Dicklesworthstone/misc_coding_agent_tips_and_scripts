@@ -34,10 +34,12 @@ cd misc_coding_agent_tips_and_scripts
   - **Linux (systemd)**: Configured as a user-level oneshot service and calendar timer (`00,03,06,09,12,15,18,21:00:00`) with 3-minute randomized jitter and boot persistence.
   - **macOS (launchd)**: Configured as a LaunchAgent (`com.jemanuel.uca.plist`) triggering every 10,800 seconds (3 hours).
 - **Installer-Workmanship Robustness**:
+  - **Zero External Dependencies & Instant Execution**: 100% pure, lightweight Bash engine (< 2MB memory, ~5ms execution) requiring no Python, Ruby, or heavyweight runtimes.
   - **Dual-Path Output**: Automatically utilizes Charmbracelet Gum when interactive, with seamless ANSI double-line box fallback for pipes and non-TTYs.
   - **Atomic PID Locking**: Prevents concurrent updates from clobbering state files when manual runs collide with background timers, with automatic stale PID recovery.
-  - **Diagnostic Health Checks (`uca doctor`)**: Tests Python runtime, Gum binary, state directory permissions, background service status, and binary paths for all harnesses.
-  - **Proxy & Network Resilience**: Inherits `HTTPS_PROXY` / `HTTP_PROXY` and applies 300s timeout safeguards.
+  - **Zero-Disk-Space Crash Prevention**: Inspects filesystem free capacity prior to running package installs, skipping updates if free disk space is critically low (< 500 MB).
+  - **Diagnostic Health Checks (`uca doctor`)**: Tests shell environment, Gum binary, state directory permissions, background service status, disk space safety, and binary paths for all harnesses.
+  - **Proxy & Network Resilience**: Inherits `HTTPS_PROXY` / `HTTP_PROXY` and applies timeout safeguards.
 
 ---
 

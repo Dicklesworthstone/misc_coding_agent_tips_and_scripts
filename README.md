@@ -513,11 +513,12 @@ Many high-end workstations (Threadripper PRO, EPYC) have **unused 10GbE ports**.
 
 **[Full guide →](BUDGET_10GBE_DIRECT_LINK_AND_REMOTE_PRODUCTIVITY.md)**
 
----
-
 ## Development Tools
 
-### Universal Coding Agent (UCA) Harness Updater
+### Universal Coding Agent Harness Updater
+
+<a id="universal-coding-agent-harness-updater"></a>
+<a id="universal-coding-agent-uca-harness-updater"></a>
 
 A standalone tool for updating, tracking versions, and scheduling background maintenance across five AI coding agent harnesses: **Claude Code**, **OpenAI Codex**, **Google Antigravity (AGY)**, **xAI Grok**, and **OMP**.
 

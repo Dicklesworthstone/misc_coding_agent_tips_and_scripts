@@ -517,9 +517,11 @@ Many high-end workstations (Threadripper PRO, EPYC) have **unused 10GbE ports**.
 
 ## Development Tools
 
-### Universal Coding Agent Harness Updater
+### Universal Coding Agent (UCA) Harness Updater
 
-A unified management and telemetry system for AI coding agent CLIs (**Claude Code**, **OpenAI Codex**, **Google Antigravity**, **xAI Grok**, and **OMP**). Includes automatic 3-hour background scheduling, an interactive Charmbracelet Gum dashboard (`ucas`), upgrade history tracking (`"From version xyz to version abc"`), atomic locking, and health diagnostics (`uca doctor`).
+A standalone tool for updating, tracking versions, and scheduling background maintenance across five AI coding agent harnesses: **Claude Code**, **OpenAI Codex**, **Google Antigravity (AGY)**, **xAI Grok**, and **OMP**.
+
+Runs as a zero-dependency Bash script with background 3-hour scheduling (launchd on macOS, systemd on Linux), live version transition tracking, low disk space safety checks, and self-healing diagnostics (`uca doctor`).
 
 **Quick Install:**
 
@@ -527,13 +529,17 @@ A unified management and telemetry system for AI coding agent CLIs (**Claude Cod
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/install-uca.sh?$(date +%s)" | bash
 ```
 
-**Commands:**
+**Common Commands:**
 
 ```bash
-uca         # Update all 5 harnesses sequentially
-ucas        # Open status dashboard with version transitions
-uca omp     # Update only OMP (or claude, codex, agy, grok)
-uca doctor  # Run preflight diagnostics and health check
+uca                  # Update all 5 harnesses sequentially
+ucas                 # View status dashboard and version history
+ucas -w              # Live auto-refreshing dashboard HUD
+uca <harness>        # Update a single harness (e.g. uca omp, uca claude)
+uca doctor           # Run environment diagnostics
+uca doctor --fix     # Safe auto-repair with automated backups
+uca doctor undo      # Revert changes made by doctor --fix
+uca logs             # View update logs
 ```
 
 **[Full guide →](UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md)**

@@ -8,9 +8,9 @@ This project has no formal versioning or GitHub Releases. There are no tags. Cha
 
 ## AI Agent Harness Management
 
-### Universal Coding Agent (UCA) Harness Updater & Status Dashboard (UCAS)
+### Universal Coding Agent (UCA) Harness Updater and Status Dashboard (UCAS)
 
-A production-grade CLI and telemetry system for managing updates across 5 AI coding agent harnesses (**Claude Code**, **OpenAI Codex**, **Google Antigravity**, **xAI Grok**, and **OMP**). Includes automatic 3-hour background scheduling (systemd user timers on Linux and launchd on macOS), Charmbracelet Gum dashboard visualization with dual-path ANSI fallback, live version change tracking (`"From version xyz to version abc"`), atomic locking with stale PID protection, and health diagnostics (`uca doctor`). Built following the `/installer-workmanship` standard.
+A tool for managing updates and version telemetry across five AI coding agent harnesses: **Claude Code**, **OpenAI Codex**, **Google Antigravity**, **xAI Grok**, and **OMP**. Includes automatic 3-hour background scheduling (systemd user timers on Linux and launchd on macOS), terminal dashboard visualization with ANSI fallback, live version change tracking (`"From version xyz to version abc"`), atomic locking with stale PID recovery, and health diagnostics (`uca doctor`).
 
 **Initial release & feature expansion** (2026-08-29):
 - Add `uca` (zero-dependency pure-Bash updater, version telemetry engine, interactive watch mode, smoke test guard, notifications, log viewer, and in-binary uninstaller)

@@ -1,20 +1,20 @@
-# Universal Coding Agent (UCA) Harness Updater & Status Dashboard
+# Universal Coding Agent (UCA) Harness Updater and Status Dashboard
 
-> **Problem:** Developers and autonomous agent workflows rely on multiple evolving AI coding agent CLIs simultaneously—**Claude Code**, **OpenAI Codex**, **Google Antigravity (AGY)**, **xAI Grok**, and **OMP**. Keeping all harnesses updated manually requires remembering different package managers (`bun`, native self-updaters, npm), leaves versions out of sync, lacks upgrade history visibility, and risks background update collisions across terminal sessions.
+UCA manages updates, version tracking, and background scheduling for five AI coding agent harnesses: **Claude Code**, **OpenAI Codex**, **Google Antigravity (AGY)**, **xAI Grok**, and **OMP**.
 
-**UCA (`uca`)** and **UCAS (`ucas`)** provide a unified, robust multi-agent harness management system with automatic 3-hour background scheduling, Charmbracelet Gum dashboard visualization, version change tracking (`"From version xyz to version abc"`), atomic locking, and health diagnostics.
+It runs as a standalone, zero-dependency Bash script with a memory footprint under 2MB and execution startup under 5ms. It includes automatic 3-hour background scheduling, terminal dashboard formatting with ANSI fallback, atomic locking, pre-flight disk space protection, and a self-healing diagnostic system.
 
 ---
 
 ## Quick Start
 
-### One-Liner Install
+### One-Line Install
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/install-uca.sh?$(date +%s)" | bash
 ```
 
-Or from a local clone:
+### Local Clone Install
 
 ```bash
 git clone https://github.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts.git
@@ -24,37 +24,31 @@ cd misc_coding_agent_tips_and_scripts
 
 ---
 
-## Key Features
+## Supported Harnesses
 
-- **Unified Multi-Harness Updates (`uca`)**:
-  Sequentially updates Claude Code (`claude update`), OpenAI Codex (`bun install -g @openai/codex@latest`), Google Antigravity (`agy update`), xAI Grok (`grok update`), and OMP (`omp update`).
-- **Interactive Status Dashboard (`ucas`)**:
-  Renders a visual dashboard featuring a **⭐ Most Recently Updated Harness** highlight, detailed semver changes (`"From version xyz to version abc"`), per-harness health badges, and background timer telemetry.
-- **Automated 3-Hour Background Scheduling**:
-  - **Linux (systemd)**: Configured as a user-level oneshot service and calendar timer (`00,03,06,09,12,15,18,21:00:00`) with 3-minute randomized jitter and boot persistence.
-  - **macOS (launchd)**: Configured as a LaunchAgent (`com.jemanuel.uca.plist`) triggering every 10,800 seconds (3 hours).
-- **Installer-Workmanship Robustness**:
-  - **Zero External Dependencies & Instant Execution**: 100% pure, lightweight Bash engine (< 2MB memory, ~5ms execution) requiring no Python, Ruby, or heavyweight runtimes.
-  - **Dual-Path Output**: Automatically utilizes Charmbracelet Gum when interactive, with seamless ANSI double-line box fallback for pipes and non-TTYs.
-  - **Atomic PID Locking**: Prevents concurrent updates from clobbering state files when manual runs collide with background timers, with automatic stale PID recovery.
-  - **Zero-Disk-Space Crash Prevention**: Inspects filesystem free capacity prior to running package installs, skipping updates if free disk space is critically low (< 500 MB).
-  - **Diagnostic Health Checks (`uca doctor`)**: Tests shell environment, Gum binary, state directory permissions, background service status, disk space safety, and binary paths for all harnesses.
-  - **Proxy & Network Resilience**: Inherits `HTTPS_PROXY` / `HTTP_PROXY` and applies timeout safeguards.
+| Harness | Target Binary | Update Command |
+|:---|:---|:---|
+| **Claude Code** | `~/.local/bin/claude` | `claude update` |
+| **OpenAI Codex** | `~/.bun/bin/codex` | `bun install -g @openai/codex@latest` (fallback `codex update`) |
+| **Google Antigravity** | `~/.local/bin/agy` | `agy update` |
+| **xAI Grok** | `~/.grok/bin/grok` | `grok update` |
+| **OMP** | `~/.bun/bin/omp` | `omp update` |
 
 ---
 
-## Commands & Usage
+## Command Reference
 
-### 1. Update All Agent Harnesses
+### Updating Harnesses
 
+Update all installed harnesses sequentially:
 ```bash
 uca
 ```
 
-Output:
+Sample output:
 ```text
 ════════════════════════════════════════════════════════════════════════════
- UCA — Universal Coding Agent Harness Updater
+ UCA: Universal Coding Agent Harness Updater
  Started at: 2026-08-29 18:18:13
 ════════════════════════════════════════════════════════════════════════════
 
@@ -62,7 +56,7 @@ Output:
   ⟳ Updating OpenAI Codex...        ✔ OpenAI Codex         Up to date (0.151.0) (0.3s)
   ⟳ Updating Google Antigravity...  ✔ Google Antigravity   Up to date (1.1.22) (0.2s)
   ⟳ Updating xAI Grok...            ✔ xAI Grok             Up to date (1.0.13) (0.7s)
-  ⟳ Updating OMP...                 🎉 OMP                  UPDATED: From version 18.0.0 to version 18.0.11 (1.1s)
+  ⟳ Updating OMP...                 ✔ OMP                  UPDATED: From version 18.0.0 to version 18.0.11 (1.1s)
 
 ────────────────────────────────────────────────────────────────────────────
  Completed in: 3.3s • Status: Completed
@@ -70,44 +64,7 @@ Output:
 ════════════════════════════════════════════════════════════════════════════
 ```
 
-### 2. View Status Dashboard (`ucas`)
-
-```bash
-ucas
-```
-
-```text
-╭───────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ UCA STATUS — Universal Coding Agent Harness Dashboard                                             │
-│ Last Full Run: 2m ago (2026-08-29 18:18:13 EDT)                                                   │
-│ Background Service: ACTIVE • launchd background service active (every 3 hours / 10800s, exit: 0) │
-╰───────────────────────────────────────────────────────────────────────────────────────────────────╯
-┌───────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ ⭐ MOST RECENTLY UPDATED HARNESS                                                                  │
-│ OMP • From version 18.0.0 to version 18.0.11 (2m ago)                                             │
-└───────────────────────────────────────────────────────────────────────────────────────────────────┘
-
- HARNESS BREAKDOWN
-────────────────────────────────────────────────────────────────────────────────────────────────────
- Harness               Version     Status          Version Changes                                     Checked     
-────────────────────────────────────────────────────────────────────────────────────────────────────
- Claude Code           2.1.251     ✔ Up to date    Up to date at 2.1.251                               2m ago      
- OpenAI Codex          0.151.0     ✔ Up to date    Up to date at 0.151.0                               2m ago      
- Google Antigravity    1.1.22      ✔ Up to date    Up to date at 1.1.22                                2m ago      
- xAI Grok              1.0.13      ✔ Up to date    Up to date at 1.0.13                                2m ago      
- OMP                   18.0.11     ✔ Up to date    From version 18.0.0 to version 18.0.11 (2m ago)     2m ago      
-────────────────────────────────────────────────────────────────────────────────────────────────────
-
- 📜 RECENT VERSION CHANGE HISTORY
-────────────────────────────────────────────────────────────────────────────────────────────────────
-  • 2026-08-29 18:18  OMP                From version 18.0.0 to version 18.0.11
-────────────────────────────────────────────────────────────────────────────────────────────────────
-
- Commands: uca (update all) • ucas (status) • uca <harness> (update one) • uca doctor (health) • uca service install
-```
-
-### 3. Update a Specific Harness
-
+Update a single harness by name:
 ```bash
 uca omp       # Update only OMP
 uca claude    # Update only Claude Code
@@ -116,25 +73,112 @@ uca agy       # Update only Google Antigravity
 uca grok      # Update only xAI Grok
 ```
 
-#### 4. World-Class Self-Healing Doctor (`uca doctor`)
-
-UCA includes a **World-Class Doctor Mode** following the 24-axiom self-healing CLI methodology (detect-then-fix, single `mutate()` chokepoint, byte-for-byte backups, and full reversibility):
-
+Dry run (check versions without applying changes):
 ```bash
-uca doctor                  # Read-only diagnostics (exit 0 healthy, 1 findings)
-uca doctor --fix            # Auto-repair with verbatim backups and audit log
-uca doctor --dry-run --fix  # Preview repair plan without executing
-uca doctor undo latest      # Revert changes made by the last doctor repair run
-uca doctor health           # One-line health summary for CI/scripts (exit 0/1)
-uca doctor capabilities     # Machine-readable JSON schema of detectors & fixers
-uca doctor robot-docs       # Paste-ready agent handbook for AI caller integration
-uca doctor --robot-triage   # Single-call JSON mega-command
+uca --dry-run
 ```
 
-Sample output of `uca doctor`:
+---
+
+### Status Dashboard (`ucas`)
+
+View the status breakdown, semver transition history, background timer state, and free disk space:
+
+```bash
+ucas
+```
+
+Sample dashboard output:
+```text
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+ UCA STATUS: Universal Coding Agent Harness Dashboard
+ Last Full Run: 10s ago
+ Background Service: ACTIVE • launchd background service active (every 3 hours / 10800s)
+ Disk Safety: 439.0 GB free (healthy) • Threshold: 500 MB
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+ ⭐ MOST RECENTLY UPDATED HARNESS:
+    omp  •  From version 18.0.0 to version 18.0.11  (10s ago)
+
+
+ HARNESS BREAKDOWN
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Harness               Version     Status          Version Changes                                     Checked     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Claude Code           2.1.251     ✔ Up to date    Up to date at 2.1.251                               10s ago     
+ OpenAI Codex          0.151.0     ✔ Up to date    Up to date at 0.151.0                               10s ago     
+ Google Antigravity    1.1.22      ✔ Up to date    Up to date at 1.1.22                                10s ago     
+ xAI Grok              1.0.13      ✔ Up to date    Up to date at 1.0.13                                10s ago     
+ OMP                   18.0.11     ✔ Up to date    From version 18.0.0 to version 18.0.11              10s ago     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ 📜 RECENT VERSION CHANGE HISTORY
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  • 2026-08-29 18:18  omp                From version 18.0.0 to version 18.0.11
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ Commands: uca (update all) • ucas (status) • ucas -w (watch) • uca doctor • uca logs • uca uninstall
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+```
+
+#### Fast Parallel Probing
+
+Probe all harness versions concurrently in parallel subshells:
+```bash
+ucas -f
+```
+
+#### Live Watch Mode
+
+Auto-refresh the terminal dashboard on a set interval (default 5 seconds):
+```bash
+ucas -w        # Refresh every 5 seconds
+ucas -w 2      # Refresh every 2 seconds
+```
+
+#### JSON Machine Output
+
+Export the complete state file in JSON format for automated pipelines:
+```bash
+ucas --json
+```
+
+---
+
+### World-Class Doctor Subsystem (`uca doctor`)
+
+UCA includes a self-healing diagnostic system adhering to detect-then-fix rules: diagnosis has zero side effects, every mutation creates a byte-for-byte backup, and all repairs are reversible.
+
+| Command | Description | Exit Codes |
+|:---|:---|:---|
+| `uca doctor` | Read-only diagnostics | `0` = healthy, `1` = findings detected |
+| `uca doctor --fix` | Apply automated repairs with backups | `0` = success, `2` = partial, `3` = rollback, `4` = unsafe |
+| `uca doctor --dry-run --fix` | Print planned repair actions without writing to disk | `0` = success |
+| `uca doctor undo [run-id]` | Revert changes from a repair run (`latest` if omitted) | `0` = restored, `1` = error |
+| `uca doctor health` | Fast one-line health check for scripts and CI | `0` = healthy, `1` = unhealthy |
+| `uca doctor capabilities` | Export JSON schema of all detectors, fixers, and exit codes | `0` = success |
+| `uca doctor robot-docs` | Output agent handbook for calling harnesses | `0` = success |
+| `uca doctor --robot-triage` | Single-call JSON mega-command with findings and suggested fix | `0` / `1` |
+
+#### Supported Detectors and Fixers
+
+1. `DET-LOCK-STALE` / `FIX-LOCK-STALE`: Detects abandoned lock directories from dead process IDs and reclaims them safely.
+2. `DET-SERVICE-INACTIVE` / `FIX-SERVICE-INACTIVE`: Detects inactive or unloaded launchd agents / systemd timers and re-enables them.
+3. `DET-SYMLINK-BROKEN` / `FIX-SYMLINK-BROKEN`: Detects missing or corrupted `ucas` command symlinks in `~/.local/bin` and restores them.
+4. `DET-STATE-CORRUPTED` / `FIX-STATE-CORRUPTED`: Detects truncated or invalid `state.json` files, creates a backup, and initializes clean state.
+5. `DET-DISK-SPACE`: Detects free disk space below safety threshold (default 500 MB).
+6. `DET-HARNESS-SMOKE` / `FIX-HARNESS-SMOKE`: Executes `--help` smoke tests against all installed harnesses, flagging corrupted binaries and re-running updates.
+7. `DET-PATH-ENV` / `FIX-PATH-ENV`: Verifies `~/.local/bin` is present in shell search paths.
+
+#### Sample Doctor Output
+
+```bash
+uca doctor
+```
+
 ```text
 ════════════════════════════════════════════════════════════════════════════
- UCA DOCTOR — Harness & Environment Diagnostics
+ UCA DOCTOR: Harness & Environment Diagnostics
 ════════════════════════════════════════════════════════════════════════════
 
   ✔ Shell runtime: Bash 5.3.9 (/bin/zsh)
@@ -153,98 +197,131 @@ Sample output of `uca doctor`:
 ════════════════════════════════════════════════════════════════════════════
 ```
 
-### 5. Live Interactive Watch Mode (`ucas -w`)
+#### Reversing a Doctor Repair Run
 
+When `uca doctor --fix` modifies files, it creates verbatim copies under `~/.local/share/uca/.doctor/runs/<run-id>/backups/` and logs operations with before-and-after SHA-256 hashes in `actions.jsonl`.
+
+To reverse the most recent repair:
 ```bash
-ucas -w        # Auto-refreshes every 5 seconds
-ucas -w 2      # Auto-refreshes every 2 seconds
+uca doctor undo latest
 ```
 
-### 6. Inspect Update Logs (`uca logs`)
-
+To reverse a specific run ID:
 ```bash
-uca logs            # View recent update log entries
-uca logs --errors   # Filter to errors and warnings only
-uca logs --follow   # Live tail update log output
-```
-
-### 7. Check Service Status & Reinstall Timer
-
-```bash
-uca service status   # Check status of background scheduler
-uca service install  # Re-register systemd timer or launchd agent
+uca doctor undo 2026-08-29T22-35-54Z__a4f7b0
 ```
 
 ---
 
-## Advanced Capabilities
+### Inspecting Logs (`uca logs`)
 
-1. **Post-Update Smoke Test & Verification Guard**:
-   Immediately after upgrading each harness, UCA executes an automated smoke test verification pass (`<harness> --help` / `--version`) to confirm the binary didn't break or suffer from runtime corruption. If any harness fails verification, UCA flags it with yellow/red telemetry and records diagnostic details.
-2. **Native Desktop & Terminal Notifications**:
-   When background auto-updater jobs upgrade any harness to a newer release, UCA dispatches a native desktop notification (`display notification` on macOS, `notify-send` on Linux) detailing the transition (`"From version xyz to version abc"`). When no updates occur, runs stay completely silent.
-3. **Parallel Async Version Probing**:
-   Using `concurrent.futures.ThreadPoolExecutor`, version inspection queries all 5 agent CLIs in parallel, completing live status discovery in <300ms (`ucas -f`).
-4. **Interactive Dashboard Watch Mode**:
-   Running `ucas -w` provides a live monitoring HUD showing current versions, latest upgrade pulses, background timer status, and clock telemetry.
-5. **Zero-Disk-Space Crash Prevention & Safety Guard**:
-   Before downloading tarballs or running package installations, UCA queries filesystem free space across `$HOME`, `/tmp`, and state partitions. If free disk space falls below the safety threshold (default: 500 MB, configurable via `UCA_MIN_DISK_MB` or `--min-disk-mb`), UCA immediately aborts the update run, prevents broken/corrupted installations, alerts the user, and skips background execution to avoid worsening system disk pressure. Override with `--ignore-disk-space`.
-
----
-
-## Supported Harnesses
-
-| Harness | Primary Binary | Update Mechanism |
-|:---|:---|:---|
-| **Claude Code** | `~/.local/bin/claude` | `claude update` |
-| **OpenAI Codex** | `~/.bun/bin/codex` | `bun install -g @openai/codex@latest` (fallback `codex update`) |
-| **Google Antigravity** | `~/.local/bin/agy` | `agy update` |
-| **xAI Grok** | `~/.grok/bin/grok` | `grok update` |
-| **OMP** | `~/.bun/bin/omp` | `omp update` |
-
----
-
-## Architecture & State Management
-
-All telemetry and upgrade history are persisted in `~/.local/share/uca/state.json`:
-
-```json
-{
-  "version": 1,
-  "last_run_at": "2026-08-29T22:18:13.227240+00:00",
-  "last_run_duration_secs": 3.32,
-  "last_run_status": "success",
-  "most_recently_updated": {
-    "key": "omp",
-    "name": "OMP",
-    "timestamp": "2026-08-29T22:18:13.227240+00:00",
-    "from_version": "18.0.0",
-    "to_version": "18.0.11",
-    "duration_secs": 1.12,
-    "status": "success"
-  },
-  "harnesses": { ... }
-}
+View update logs:
+```bash
+uca logs            # View the last 40 entries
+uca logs --errors   # Show only error and warning events
+uca logs --follow   # Stream real-time log output
 ```
 
-Writes are executed atomically via temporary file replacement (`state.json.tmp.<pid>` -> `state.json`) protected by `AtomicLock`.
+Log files are stored at:
+- Standard log: `~/.local/share/uca/uca.log`
+- Error log: `~/.local/share/uca/uca-error.log`
+
+---
+
+### Managing Background Scheduling
+
+UCA schedules automated runs every 3 hours.
+
+Inspect scheduler status:
+```bash
+uca service status
+```
+
+Re-install or re-enable the background scheduler:
+```bash
+uca service install
+```
+
+- **macOS**: Configured via launchd at `~/Library/LaunchAgents/com.<username>.uca.plist` with a 10,800-second interval (`StartInterval = 10800`).
+- **Linux**: Configured via systemd user timer at `~/.config/systemd/user/uca.timer` with calendar schedule `*-*-* 00,03,06,09,12,15,18,21:00:00` and randomized 3-minute jitter.
+
+---
+
+## Safety Features
+
+### Zero-Disk-Space Crash Prevention
+
+Before initiating package updates, UCA queries filesystem capacity with `df -Pk`. If available space drops below the threshold (default: 500 MB), UCA skips the update cycle, outputs a warning, and prevents corrupted downloads or partial installations.
+
+In background service runs (`--quiet`), UCA logs the skip and sends a desktop notification without writing large error dumps.
+
+Override or configure the threshold:
+```bash
+uca --min-disk-mb 1000     # Require 1 GB free
+uca --ignore-disk-space    # Bypass check
+export UCA_MIN_DISK_MB=250 # Environment override
+```
+
+### Atomic Directory Locking
+
+UCA protects state files with directory-level atomic locking (`~/.local/share/uca/.lock`). If a manual terminal run and a background timer run start at the same time, one acquires the lock and proceeds while the other exits cleanly. Stale locks from crashed processes are identified via `kill -0 <pid>` and automatically reclaimed.
+
+### Post-Update Smoke Verification
+
+After each update, UCA executes a quick verification call (`<harness> --help`) to confirm the binary remains functional. If an update breaks the binary or produces a runtime error, UCA flags the harness with a warning in `ucas` and `uca doctor`.
+
+### Desktop Notifications
+
+On version upgrades, UCA sends a desktop alert via macOS `osascript` or Linux `notify-send` showing the previous and new version numbers. Routine runs with no version changes execute silently.
+
+---
+
+## Complete CLI Options
+
+```text
+Usage:
+  uca                 Update all agent harnesses (claude, codex, agy, grok, omp)
+  ucas                Show status breakdown, version changes, and schedule
+  ucas -w, --watch    Interactive live auto-refreshing dashboard
+  ucas -f, --fast     Probe versions in parallel (sub-second discovery)
+  uca <harness>       Update specific harness (e.g. 'uca omp', 'uca claude')
+  uca doctor          Run preflight diagnostics and environment verification
+  uca doctor --fix    Safely repair detected issues with automated backups
+  uca doctor undo     Revert changes from a doctor repair run
+  uca logs            Inspect update logs (--errors, --follow)
+  uca service install Install 3-hour background auto-updater service
+  uca service status  Show background service status
+  uca uninstall       Cleanly remove UCA, timers, and aliases (--purge)
+  uca check           Probe versions without running updates
+
+Options:
+  -q, --quiet            Minimal output (for cron / background runs)
+  --notify               Dispatch desktop notification on version change
+  --no-smoke-test        Skip post-update verification guard
+  --ignore-disk-space    Bypass free disk space safety threshold
+  --min-disk-mb <N>      Set minimum free disk space threshold (default: 500 MB)
+  --dry-run              Check versions without applying updates
+  --no-gum               Disable gum styling and use pure ANSI fallback
+  --json                 Output status in JSON format
+  -h, --help             Show this help message
+```
 
 ---
 
 ## Uninstallation
 
-To cleanly and completely remove UCA, its background services, symlinks, and shell aliases:
+Remove UCA, background launchd/systemd services, symlinks, and shell aliases:
 
 ```bash
-# In-binary removal
+# In-CLI uninstallation
 uca uninstall
 
-# Or with state cache purge
+# Purge state cache and logs
 uca uninstall --purge -y
 
-# Or via dedicated uninstaller script
+# Dedicated standalone uninstaller script
 ./uninstall-uca.sh --purge
 
-# Or via curl one-liner
+# One-line curl removal
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/uninstall-uca.sh?$(date +%s)" | bash
 ```

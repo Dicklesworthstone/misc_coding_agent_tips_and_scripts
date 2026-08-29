@@ -133,6 +133,79 @@ def gum_style(*args: str, text: str = "") -> str:
     except Exception:
         return text
 
+# Minimum Free Disk Space Threshold (in Megabytes)
+# Auto-updates will safely pause if free disk space falls below this limit
+DEFAULT_MIN_FREE_DISK_MB = 500
+MIN_FREE_DISK_MB = int(os.environ.get("UCA_MIN_DISK_MB", str(DEFAULT_MIN_FREE_DISK_MB)))
+
+def get_disk_space_info(threshold_mb: int = MIN_FREE_DISK_MB) -> Dict[str, Any]:
+    """Checks free disk space across home, tmp, and state partitions."""
+    paths_to_check = [Path.home(), STATE_DIR]
+    try:
+        import tempfile
+        paths_to_check.append(Path(tempfile.gettempdir()))
+    except Exception:
+        pass
+
+    min_free_bytes = None
+    min_free_path = None
+    total_bytes = None
+    
+    for p in paths_to_check:
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            usage = shutil.disk_usage(p)
+            if min_free_bytes is None or usage.free < min_free_bytes:
+                min_free_bytes = usage.free
+                min_free_path = str(p)
+                total_bytes = usage.total
+        except Exception:
+            pass
+            
+    if min_free_bytes is None:
+        return {
+            "free_bytes": 10**12,
+            "free_mb": 1000000.0,
+            "free_gb": 1000.0,
+            "total_gb": 1000.0,
+            "is_low": False,
+            "is_critical": False,
+            "path": str(Path.home()),
+            "threshold_mb": threshold_mb,
+        }
+        
+    free_mb = min_free_bytes / (1024 * 1024)
+    free_gb = min_free_bytes / (1024 * 1024 * 1024)
+    total_gb = (total_bytes or 0) / (1024 * 1024 * 1024)
+    
+    is_low = free_mb < threshold_mb
+    is_critical = free_mb < min(100.0, threshold_mb / 2.0)
+    
+    return {
+        "free_bytes": min_free_bytes,
+        "free_mb": round(free_mb, 1),
+        "free_gb": round(free_gb, 2),
+        "total_gb": round(total_gb, 1),
+        "is_low": is_low,
+        "is_critical": is_critical,
+        "path": min_free_path or str(Path.home()),
+        "threshold_mb": threshold_mb,
+    }
+
+def draw_box(color_code: int, lines: List[str]) -> None:
+    """Renders a stylized double-line Unicode box with ANSI color."""
+    max_len = 0
+    for line in lines:
+        vlen = visible_len(line)
+        if vlen > max_len:
+            max_len = vlen
+    border = "═" * (max_len + 4)
+    print(f"\033[38;5;{color_code}m╔{border}╗\033[0m")
+    for line in lines:
+        pad = max_len - visible_len(line)
+        print(f"\033[38;5;{color_code}m║\033[0m  {line}{' ' * pad}  \033[38;5;{color_code}m║\033[0m")
+    print(f"\033[38;5;{color_code}m╚{border}╝\033[0m")
+
 # Atomic Locking with Stale PID Detection & Signal Trap
 class AtomicLock:
     def __init__(self, lock_dir: Path):
@@ -560,11 +633,60 @@ def run_all_updates(
     dry_run: bool = False,
     notify: bool = True,
     smoke_test: bool = True,
+    ignore_disk_space: bool = False,
+    min_disk_mb: int = MIN_FREE_DISK_MB,
 ) -> int:
     with AtomicLock(LOCK_DIR):
         state = load_state()
         start_total = time.time()
         now_iso = datetime.now(timezone.utc).isoformat()
+        
+        # Pre-run Free Disk Space Safety Guard
+        disk_info = get_disk_space_info(threshold_mb=min_disk_mb)
+        if disk_info["is_low"] and not ignore_disk_space and not dry_run:
+            free_mb_val = disk_info["free_mb"]
+            thresh_mb_val = disk_info["threshold_mb"]
+            disk_path_val = disk_info["path"]
+            if not quiet:
+                if has_gum():
+                    warn_box = gum_style(
+                        "--border", "double",
+                        "--border-foreground", "196",
+                        "--padding", "0 2",
+                        "--margin", "1 0",
+                        f"{gum_style('--foreground', '196', '--bold', text='⚠️  DISK SPACE SAFETY GUARD TRIGGERED')}\n\n"
+                        f"{gum_style('--foreground', '252', '--bold', text='Available space: ' + str(free_mb_val) + ' MB')}"
+                        f"{gum_style('--foreground', '245', text=' (Minimum required: ' + str(thresh_mb_val) + ' MB on ' + disk_path_val + ')')}\n"
+                        f"{gum_style('--foreground', '245', text='All update attempts skipped to prevent corrupted downloads or broken installs.')}\n"
+                        f"{gum_style('--foreground', '245', text='To override: uca --ignore-disk-space or set UCA_MIN_DISK_MB=0')}"
+                    )
+                    print(warn_box)
+                else:
+                    lines = [
+                        "\033[1;38;5;196m⚠️  DISK SPACE SAFETY GUARD TRIGGERED\033[0m",
+                        "",
+                        f"\033[1;38;5;252mAvailable space: {free_mb_val} MB\033[0m \033[38;5;245m(Minimum threshold: {thresh_mb_val} MB on {disk_path_val})\033[0m",
+                        "\033[38;5;245mAll update attempts skipped to prevent corrupted downloads or broken installs.\033[0m",
+                        "\033[38;5;245mTo override: uca --ignore-disk-space or set UCA_MIN_DISK_MB=0\033[0m",
+                    ]
+                    draw_box(196, lines)
+
+            if notify and quiet:
+                send_desktop_notification(
+                    "⚠️ UCA Auto-Updates Paused",
+                    f"Disk space low ({disk_info['free_mb']} MB free). Free disk space to resume auto-updates."
+                )
+
+            # Record skip in state & log
+            state["last_run_at"] = now_iso
+            state["last_run_status"] = "skipped_low_disk"
+            save_state(state)
+            try:
+                with open(LOG_FILE, "a", encoding="utf-8") as lf:
+                    lf.write(f"[{now_iso}] uca run SKIPPED: low disk space ({disk_info['free_mb']} MB free on {disk_info['path']})\n")
+            except Exception:
+                pass
+            return 0
         
         configs_to_run = HARNESS_CONFIGS
         if target_keys:
@@ -839,19 +961,27 @@ def print_status_dashboard(json_mode: bool = False, fast: bool = True) -> None:
             candidate_changes.sort(key=lambda x: x["timestamp"], reverse=True)
             mru = candidate_changes[0]
 
+    disk_info = get_disk_space_info()
+
     if use_gum_render:
         # Header Card with Gum
         srv_badge = gum_style("--foreground", "42", "--bold", text="ACTIVE") if service.get("active") else gum_style("--foreground", "214", "--bold", text="INACTIVE")
+        if disk_info["is_low"]:
+            disk_badge = gum_style("--foreground", "196", "--bold", text="⚠️ " + str(disk_info['free_mb']) + " MB free (PAUSED)")
+        else:
+            disk_badge = f"{gum_style('--foreground', '42', '--bold', text=str(disk_info['free_gb']) + ' GB free')} {gum_style('--foreground', '245', text='(healthy)')}"
+
         header_l1 = f"{gum_style('--foreground', '42', '--bold', text='UCA STATUS')} {gum_style('--foreground', '245', text='— Universal Coding Agent Harness Dashboard')}"
         header_l2 = f"{gum_style('--foreground', '245', text='Last Full Run:')} {gum_style('--bold', '--foreground', '252', text=last_run_str)}{gum_style('--foreground', '245', text=last_run_full)}"
         header_l3 = f"{gum_style('--foreground', '245', text='Background Service:')} {srv_badge} {gum_style('--foreground', '245', text='• ' + service.get('detail', ''))}"
+        header_l4 = f"{gum_style('--foreground', '245', text='Disk Safety:')} {disk_badge} {gum_style('--foreground', '245', text='• Safety threshold: ' + str(disk_info['threshold_mb']) + ' MB')}"
         
         banner = gum_style(
             "--border", "rounded",
             "--border-foreground", "39",
             "--padding", "0 1",
             "--margin", "1 0 0 0",
-            f"{header_l1}\n{header_l2}\n{header_l3}"
+            f"{header_l1}\n{header_l2}\n{header_l3}\n{header_l4}"
         )
         print(banner)
 
@@ -892,6 +1022,11 @@ def print_status_dashboard(json_mode: bool = False, fast: bool = True) -> None:
         
         srv_status_text = c("ACTIVE", ANSI.GREEN, ANSI.BOLD) if service.get("active") else c("INACTIVE / MANUAL", ANSI.YELLOW)
         print(f" {c('Background Service:', ANSI.GRAY)} {srv_status_text} • {c(service.get('detail', ''), ANSI.GRAY)}")
+        
+        if disk_info["is_low"]:
+            print(f" {c('Disk Safety:', ANSI.RED, ANSI.BOLD)} {c('⚠️ ' + str(disk_info['free_mb']) + ' MB free', ANSI.RED, ANSI.BOLD)} • {c('CRITICAL (Below ' + str(disk_info['threshold_mb']) + ' MB threshold) • Auto-updates paused', ANSI.YELLOW)}")
+        else:
+            print(f" {c('Disk Safety:', ANSI.GRAY)} {c(str(disk_info['free_gb']) + ' GB free', ANSI.GREEN, ANSI.BOLD)} {c('(healthy)', ANSI.GRAY)} • {c('Threshold: ' + str(disk_info['threshold_mb']) + ' MB', ANSI.GRAY)}")
         print(f"{c(sep, ANSI.BLUE)}\n")
 
         # Most Recently Updated Banner
@@ -1079,14 +1214,23 @@ def run_doctor() -> None:
     # 3. Check State directory and file
     print(f"  {c('✔', ANSI.GREEN)} State storage: {STATE_DIR} (writable={os.access(STATE_DIR, os.W_OK)})")
 
-    # 4. Check Background Service
+    # 4. Check Disk Space Safety
+    disk_info = get_disk_space_info()
+    if disk_info["is_critical"]:
+        print(f"  {c('✗', ANSI.RED)} Disk Space Safety: {c(str(disk_info['free_mb']) + ' MB free', ANSI.RED, ANSI.BOLD)} on {disk_info['path']} (CRITICAL - Minimum required: {disk_info['threshold_mb']} MB)")
+    elif disk_info["is_low"]:
+        print(f"  {c('⚠️', ANSI.YELLOW)} Disk Space Safety: {c(str(disk_info['free_mb']) + ' MB free', ANSI.YELLOW, ANSI.BOLD)} on {disk_info['path']} (Warning - Below safety threshold of {disk_info['threshold_mb']} MB)")
+    else:
+        print(f"  {c('✔', ANSI.GREEN)} Disk Space Safety: {c(str(disk_info['free_gb']) + ' GB free', ANSI.BOLD, ANSI.GREEN)} on {disk_info['path']} (Min safety threshold: {disk_info['threshold_mb']} MB)")
+
+    # 5. Check Background Service
     srv = get_service_status()
     if srv["active"]:
         print(f"  {c('✔', ANSI.GREEN)} 3-Hour Auto-Updater: {c(srv['detail'], ANSI.GREEN, ANSI.BOLD)}")
     else:
         print(f"  {c('⚠️', ANSI.YELLOW)} 3-Hour Auto-Updater: {c(srv['detail'], ANSI.YELLOW)} (run `uca service install` to enable)")
 
-    # 5. Check each harness
+    # 6. Check each harness
     print(f"\n  {c('Harness Integrity & Smoke Checks:', ANSI.BOLD)}")
     for cfg in HARNESS_CONFIGS:
         name = cfg["name"]
@@ -1434,7 +1578,21 @@ Usage:
     notify = "--notify" in raw_args or quiet  # Send notification in background quiet mode
     smoke_test = "--no-smoke-test" not in raw_args
     dry_run = "--dry-run" in raw_args
+    ignore_disk_space = "--ignore-disk-space" in raw_args or "--force-disk" in raw_args
     help_flag = "-h" in raw_args or "--help" in raw_args
+
+    min_disk_mb = MIN_FREE_DISK_MB
+    for i, a in enumerate(raw_args):
+        if a.startswith("--min-disk-mb="):
+            try:
+                min_disk_mb = int(a.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif a == "--min-disk-mb" and i + 1 < len(raw_args):
+            try:
+                min_disk_mb = int(raw_args[i + 1])
+            except ValueError:
+                pass
 
     if help_flag:
         print("""UCA — Universal Coding Agent Harness Updater & Version Tracker
@@ -1452,20 +1610,29 @@ Usage:
   uca check           Probe versions without running updates
 
 Options:
-  -q, --quiet         Minimal output (for automated / cron / service runs)
-  --notify            Dispatch desktop notification on version change
-  --no-smoke-test     Skip post-update verification guard
-  --dry-run           Check versions without applying updates
-  --no-gum            Disable gum styling and use ANSI fallback
-  --json              Output status in JSON format
-  -h, --help          Show this help message
+  -q, --quiet            Minimal output (for automated / cron / service runs)
+  --notify               Dispatch desktop notification on version change
+  --no-smoke-test        Skip post-update verification guard
+  --ignore-disk-space    Bypass free disk space safety threshold
+  --min-disk-mb <N>      Set minimum free disk space threshold (default: 500 MB)
+  --dry-run              Check versions without applying updates
+  --no-gum               Disable gum styling and use ANSI fallback
+  --json                 Output status in JSON format
+  -h, --help             Show this help message
 """)
         return
 
     # Filter out flags to find target harnesses
     known_harness_keys = {cfg["key"] for cfg in HARNESS_CONFIGS}
     targets = []
-    for arg in raw_args:
+    skip_next = False
+    for i, arg in enumerate(raw_args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--min-disk-mb":
+            skip_next = True
+            continue
         if arg.startswith("-"):
             continue
         if arg.lower() in ["update", "run"]:
@@ -1489,6 +1656,8 @@ Options:
         dry_run=dry_run,
         notify=notify,
         smoke_test=smoke_test,
+        ignore_disk_space=ignore_disk_space,
+        min_disk_mb=min_disk_mb,
     )
     sys.exit(code)
 

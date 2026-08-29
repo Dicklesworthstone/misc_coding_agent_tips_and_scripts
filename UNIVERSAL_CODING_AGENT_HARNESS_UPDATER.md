@@ -175,6 +175,8 @@ uca service install  # Re-register systemd timer or launchd agent
    Using `concurrent.futures.ThreadPoolExecutor`, version inspection queries all 5 agent CLIs in parallel, completing live status discovery in <300ms (`ucas -f`).
 4. **Interactive Dashboard Watch Mode**:
    Running `ucas -w` provides a live monitoring HUD showing current versions, latest upgrade pulses, background timer status, and clock telemetry.
+5. **Zero-Disk-Space Crash Prevention & Safety Guard**:
+   Before downloading tarballs or running package installations, UCA queries filesystem free space across `$HOME`, `/tmp`, and state partitions. If free disk space falls below the safety threshold (default: 500 MB, configurable via `UCA_MIN_DISK_MB` or `--min-disk-mb`), UCA immediately aborts the update run, prevents broken/corrupted installations, alerts the user, and skips background execution to avoid worsening system disk pressure. Override with `--ignore-disk-space`.
 
 ---
 

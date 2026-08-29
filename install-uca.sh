@@ -35,6 +35,8 @@ FORCE=0
 DRY_RUN=0
 UNINSTALL=0
 SYSTEM_MODE=0
+IGNORE_DISK_SPACE=0
+MIN_DISK_MB=500
 
 # Parse arguments
 for arg in "$@"; do
@@ -45,17 +47,21 @@ for arg in "$@"; do
     --dry-run)        DRY_RUN=1 ;;
     --uninstall)      UNINSTALL=1 ;;
     --system)         SYSTEM_MODE=1 ;;
+    --ignore-disk-space) IGNORE_DISK_SPACE=1 ;;
+    --min-disk-mb=*)  MIN_DISK_MB="${arg#*=}" ;;
     --help|-h)
       echo "Usage: ./install-uca.sh [OPTIONS]"
       echo ""
       echo "Options:"
-      echo "  --quiet, -q    Minimal output"
-      echo "  --no-gum       Force ANSI fallback output (disable gum)"
-      echo "  --force, -f    Force overwrite and reinstallation"
-      echo "  --dry-run      Preview actions without modifying system"
-      echo "  --system       Install to /usr/local/bin (requires root)"
-      echo "  --uninstall    Remove UCA, UCAS, and background timers"
-      echo "  --help, -h     Show this help message"
+      echo "  --quiet, -q          Minimal output"
+      echo "  --no-gum             Force ANSI fallback output (disable gum)"
+      echo "  --force, -f          Force overwrite and reinstallation"
+      echo "  --dry-run            Preview actions without modifying system"
+      echo "  --system             Install to /usr/local/bin (requires root)"
+      echo "  --ignore-disk-space  Bypass disk space safety checks"
+      echo "  --min-disk-mb <N>    Minimum free disk space in MB (default: 500)"
+      echo "  --uninstall          Remove UCA, UCAS, and background timers"
+      echo "  --help, -h           Show this help message"
       exit 0
       ;;
     *)
@@ -300,13 +306,20 @@ preflight_checks() {
   fi
   ok "Write permissions verified for $DEST_DIR and $STATE_DIR"
 
-  # Check disk space (minimum 10MB)
-  local free_kb
-  free_kb=$(df -Pk "$DEST_DIR" 2>/dev/null | tail -1 | awk '{print $4}' || echo "100000")
-  if [ "$free_kb" -lt 10000 ]; then
-    warn "Low disk space on partition ($((free_kb / 1024))MB free)"
+  # Check disk space safety
+  local free_kb free_mb min_kb
+  free_kb=$(df -Pk "$DEST_DIR" 2>/dev/null | tail -1 | awk '{print $4}' || echo "1000000")
+  free_mb=$((free_kb / 1024))
+  min_kb=$((MIN_DISK_MB * 1024))
+
+  if [ "$free_kb" -lt 51200 ] && [ "$IGNORE_DISK_SPACE" -eq 0 ]; then
+    err "Critical disk space shortage: only ${free_mb}MB free on $DEST_DIR (minimum 50MB required)."
+    err "Aborting installation to prevent disk corruption. Pass --ignore-disk-space to override."
+    exit 1
+  elif [ "$free_kb" -lt "$min_kb" ] && [ "$IGNORE_DISK_SPACE" -eq 0 ]; then
+    warn "Low disk space on partition (${free_mb}MB free, recommended: ${MIN_DISK_MB}MB+)."
   else
-    ok "Disk space check passed"
+    ok "Disk space check passed (${free_mb}MB free)"
   fi
 }
 preflight_checks

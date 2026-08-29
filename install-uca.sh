@@ -183,11 +183,6 @@ case "$ARCH" in
   arm64|aarch64) ARCH="arm64" ;;
 esac
 
-IS_WSL=0
-if [ "$OS" = "linux" ] && grep -qi microsoft /proc/version 2>/dev/null; then
-  IS_WSL=1
-fi
-
 # Determine Destination Paths
 if [ "$SYSTEM_MODE" -eq 1 ]; then
   DEST_DIR="/usr/local/bin"
@@ -243,7 +238,7 @@ acquire_lock() {
 acquire_lock
 
 # Uninstall Flow
-if [ "$UNINSTALL" -eq 1 ]; then
+uninstall_flow() {
   info "Uninstalling UCA, UCAS, and background services..."
   
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -278,6 +273,10 @@ if [ "$UNINSTALL" -eq 1 ]; then
   ok "Removed $BINARY_PATH and $SYMLINK_PATH"
   ok "UCA uninstalled successfully."
   exit 0
+}
+
+if [ "$UNINSTALL" -eq 1 ]; then
+  uninstall_flow
 fi
 
 # Preflight Checks
@@ -361,6 +360,10 @@ install_uca_script() {
     echo "  would install $src_file -> $BINARY_PATH"
     echo "  would symlink $BINARY_PATH -> $SYMLINK_PATH"
     return 0
+  fi
+
+  if [ -f "$BINARY_PATH" ] && [ "$FORCE" -eq 1 ]; then
+    info "Overwriting existing $BINARY_PATH (--force)"
   fi
 
   if [ -n "$src_file" ] && [ -f "$src_file" ]; then

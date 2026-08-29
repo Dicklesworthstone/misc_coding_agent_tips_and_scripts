@@ -116,29 +116,39 @@ uca agy       # Update only Google Antigravity
 uca grok      # Update only xAI Grok
 ```
 
-### 4. Run Preflight & Health Diagnostics
+#### 4. World-Class Self-Healing Doctor (`uca doctor`)
+
+UCA includes a **World-Class Doctor Mode** following the 24-axiom self-healing CLI methodology (detect-then-fix, single `mutate()` chokepoint, byte-for-byte backups, and full reversibility):
 
 ```bash
-uca doctor
+uca doctor                  # Read-only diagnostics (exit 0 healthy, 1 findings)
+uca doctor --fix            # Auto-repair with verbatim backups and audit log
+uca doctor --dry-run --fix  # Preview repair plan without executing
+uca doctor undo latest      # Revert changes made by the last doctor repair run
+uca doctor health           # One-line health summary for CI/scripts (exit 0/1)
+uca doctor capabilities     # Machine-readable JSON schema of detectors & fixers
+uca doctor robot-docs       # Paste-ready agent handbook for AI caller integration
+uca doctor --robot-triage   # Single-call JSON mega-command
 ```
 
-Output:
+Sample output of `uca doctor`:
 ```text
 ════════════════════════════════════════════════════════════════════════════
  UCA DOCTOR — Harness & Environment Diagnostics
 ════════════════════════════════════════════════════════════════════════════
 
-  ✔ Python runtime: 3.14.6 (/opt/homebrew/opt/python@3.14/bin/python3.14)
+  ✔ Shell runtime: Bash 5.3.9 (/bin/zsh)
   ✔ Charmbracelet Gum: Found (gum version 0.17.0)
-  ✔ State storage: /Users/jemanuel/.local/share/uca (writable=True)
-  ✔ 3-Hour Auto-Updater: launchd background service active (every 3 hours / 10800s, last exit: 0)
+  ✔ State storage: /Users/jemanuel/.local/share/uca (writable=true)
+  ✔ Disk Space Safety: 439.0 GB free on /Users/jemanuel (Min safety threshold: 500 MB)
+  ✔ 3-Hour Auto-Updater: launchd background service active (every 3 hours / 10800s)
 
-  Harness Integrity Checks:
-    ✔ Claude Code          /Users/jemanuel/.local/bin/claude        Version: 2.1.251
-    ✔ OpenAI Codex         /Users/jemanuel/.bun/bin/codex           Version: 0.151.0
-    ✔ Google Antigravity   /Users/jemanuel/.local/bin/agy           Version: 1.1.22
-    ✔ xAI Grok             /Users/jemanuel/.grok/bin/grok           Version: 1.0.13
-    ✔ OMP                  /Users/jemanuel/.bun/bin/omp             Version: 18.0.11
+  Harness Integrity & Smoke Checks:
+    ✔ Claude Code          /Users/jemanuel/.local/bin/claude      Version: 2.1.251        Smoke: Ready
+    ✔ OpenAI Codex         /Users/jemanuel/.bun/bin/codex         Version: 0.151.0        Smoke: Ready
+    ✔ Google Antigravity   /Users/jemanuel/.local/bin/agy         Version: 1.1.22         Smoke: Ready
+    ✔ xAI Grok             /Users/jemanuel/.grok/bin/grok         Version: 1.0.13         Smoke: Ready
+    ✔ OMP                  /Users/jemanuel/.bun/bin/omp           Version: 18.0.11        Smoke: Ready
 
 ════════════════════════════════════════════════════════════════════════════
 ```

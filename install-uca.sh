@@ -25,7 +25,10 @@ set -euo pipefail
 shopt -s lastpipe 2>/dev/null || true
 umask 022
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
+fi
 TEMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'uca-install')"
 LOCK_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/uca/.install-lock"
 

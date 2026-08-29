@@ -1088,7 +1088,8 @@ doctor_capabilities() {
     { "id": "DET-STATE-CORRUPTED", "name": "State File Integrity", "description": "Detects corrupted or unparseable state.json", "auto_fixable": true },
     { "id": "DET-DISK-SPACE", "name": "Free Disk Space Safety", "description": "Detects disk space below safety threshold", "auto_fixable": false },
     { "id": "DET-HARNESS-SMOKE", "name": "Harness Binary Smoke Test", "description": "Detects broken or unexecutable agent CLI binaries", "auto_fixable": true },
-    { "id": "DET-PATH-ENV", "name": "PATH Environment Configuration", "description": "Detects ~/.local/bin missing from PATH", "auto_fixable": true }
+    { "id": "DET-PATH-ENV", "name": "PATH Environment Configuration", "description": "Detects ~/.local/bin missing from PATH", "auto_fixable": true },
+    { "id": "DET-ALIAS-CONFLICT", "name": "Shell Alias Shadowing", "description": "Detects alias uca overriding the binary in shell rc", "auto_fixable": true }
   ],
   "fixers": [
     { "id": "FIX-LOCK-STALE", "detector_id": "DET-LOCK-STALE", "safe": true, "reversible": true },
@@ -1096,7 +1097,8 @@ doctor_capabilities() {
     { "id": "FIX-SYMLINK-BROKEN", "detector_id": "DET-SYMLINK-BROKEN", "safe": true, "reversible": true },
     { "id": "FIX-STATE-CORRUPTED", "detector_id": "DET-STATE-CORRUPTED", "safe": true, "reversible": true },
     { "id": "FIX-HARNESS-SMOKE", "detector_id": "DET-HARNESS-SMOKE", "safe": true, "reversible": false },
-    { "id": "FIX-PATH-ENV", "detector_id": "DET-PATH-ENV", "safe": true, "reversible": true }
+    { "id": "FIX-PATH-ENV", "detector_id": "DET-PATH-ENV", "safe": true, "reversible": true },
+    { "id": "FIX-ALIAS-CONFLICT", "detector_id": "DET-ALIAS-CONFLICT", "safe": true, "reversible": true }
   ],
   "exit_codes": {
     "0": "healthy / all repairs succeeded",
@@ -1222,6 +1224,16 @@ run_doctor_suite() {
     fixes_planned+=("FIX-PATH-ENV: Add ~/.local/bin to PATH configuration in shell rc")
   fi
 
+  # 8. DET-ALIAS-CONFLICT
+  local alias_conflict=0
+  for rc in "$HOME/.zshrc" "$HOME/.zshrc.local" "$HOME/.bashrc" "$HOME/.bash_aliases"; do
+    if [ -f "$rc" ] && grep -q "^[[:space:]]*alias uca=" "$rc" 2>/dev/null; then
+      alias_conflict=1
+      findings+=("DET-ALIAS-CONFLICT: Conflicting alias uca found in $rc")
+      fixes_planned+=("FIX-ALIAS-CONFLICT: Remove alias uca from $rc and ensure unalias uca guard")
+    fi
+  done
+
   # Health-only mode
   if [ "$health_only" -eq 1 ]; then
     if [ "${#findings[@]}" -eq 0 ]; then
@@ -1336,6 +1348,27 @@ EOF
             fixes_applied+=("FIX-PATH-ENV")
             break
           fi
+        fi
+      done
+    fi
+
+    # Fix 7: Alias Conflict
+    if [ "$alias_conflict" -eq 1 ]; then
+      for rc in "$HOME/.zshrc" "$HOME/.zshrc.local" "$HOME/.bashrc" "$HOME/.bash_aliases"; do
+        if [ -f "$rc" ] && [ -w "$rc" ]; then
+          if grep -q "^[[:space:]]*alias uca=" "$rc" 2>/dev/null; then
+            local cleaned_content
+            cleaned_content=$(sed '/^[[:space:]]*alias uca=/d' "$rc")
+            doctor_mutate "$run_dir" "$rc" "write_file" "$cleaned_content"
+            echo -e "  ${C_GREEN}✔${C_RESET} [FIX-ALIAS-CONFLICT] Removed alias uca from $rc with backup"
+            fixes_applied+=("FIX-ALIAS-CONFLICT-$rc")
+          fi
+        fi
+      done
+      for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+        if [ -f "$rc" ] && [ -w "$rc" ] && ! grep -q "unalias uca" "$rc" 2>/dev/null; then
+          doctor_mutate "$run_dir" "$rc" "append_line" "unalias uca 2>/dev/null || true"
+          echo -e "  ${C_GREEN}✔${C_RESET} [FIX-ALIAS-CONFLICT] Added unalias uca guard to $rc"
         fi
       done
     fi

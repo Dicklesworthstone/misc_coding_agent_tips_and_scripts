@@ -138,13 +138,13 @@ if command -v systemctl &>/dev/null; then
 fi
 
 # 3. Clean shell aliases
-for shell_rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.config/fish/config.fish"; do
+for shell_rc in "$HOME/.zshrc" "$HOME/.zshrc.local" "$HOME/.bashrc" "$HOME/.bash_aliases" "$HOME/.config/fish/config.fish"; do
   if [ -f "$shell_rc" ] && [ -w "$shell_rc" ]; then
-    if grep -q "alias ucas=" "$shell_rc" 2>/dev/null || grep -q "alias uca=" "$shell_rc" 2>/dev/null; then
+    if grep -q "alias ucas=" "$shell_rc" 2>/dev/null || grep -q "alias uca=" "$shell_rc" 2>/dev/null || grep -q "unalias uca" "$shell_rc" 2>/dev/null; then
       if [ "$DRY_RUN" -eq 1 ]; then
         echo "  would clean aliases from $shell_rc"
       else
-        sed -i.bak '/alias ucas=/d; /alias uca=/d' "$shell_rc" 2>/dev/null || true
+        sed -i.bak '/alias ucas=/d; /alias uca=/d; /unalias uca/d' "$shell_rc" 2>/dev/null || true
         rm -f "${shell_rc}.bak" 2>/dev/null || true
         ok "Cleaned aliases from $shell_rc"
       fi

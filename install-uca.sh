@@ -420,40 +420,67 @@ run_with_spinner "Configuring 3-hour background scheduler..." configure_backgrou
 # Shell Integration
 configure_shell_integration() {
   local zshrc="$HOME/.zshrc"
+  local zshrc_local="$HOME/.zshrc.local"
   local bashrc="$HOME/.bashrc"
+  local bash_aliases="$HOME/.bash_aliases"
+  local fishrc="$HOME/.config/fish/config.fish"
   
   if [ "$DRY_RUN" -eq 1 ]; then
-    echo "  would verify PATH and alias in shell configs"
+    echo "  would verify PATH, remove alias conflicts, and configure ucas in shell configs"
     return 0
+  fi
+
+  # Clean old alias uca= from zshrc.local if present
+  if [ -f "$zshrc_local" ] && [ -w "$zshrc_local" ]; then
+    if grep -q "alias uca=" "$zshrc_local" 2>/dev/null; then
+      sed -i.bak '/alias uca=/d' "$zshrc_local" 2>/dev/null || true
+      rm -f "${zshrc_local}.bak" 2>/dev/null || true
+    fi
+  fi
+
+  # Clean old alias uca= from bash_aliases if present
+  if [ -f "$bash_aliases" ] && [ -w "$bash_aliases" ]; then
+    if grep -q "alias uca=" "$bash_aliases" 2>/dev/null; then
+      sed -i.bak '/alias uca=/d' "$bash_aliases" 2>/dev/null || true
+      rm -f "${bash_aliases}.bak" 2>/dev/null || true
+    fi
   fi
 
   # Add alias to .zshrc if not present
   if [ -f "$zshrc" ] && [ -w "$zshrc" ]; then
-    if ! grep -q "alias ucas=" "$zshrc" 2>/dev/null; then
-      echo "alias ucas='uca status'" >> "$zshrc"
-    fi
-    # Remove old complex uca alias if present
     if grep -q "alias uca=" "$zshrc" 2>/dev/null; then
       sed -i.bak '/alias uca=/d' "$zshrc" 2>/dev/null || true
       rm -f "${zshrc}.bak" 2>/dev/null || true
+    fi
+    if ! grep -q "unalias uca" "$zshrc" 2>/dev/null; then
+      echo "unalias uca 2>/dev/null || true" >> "$zshrc"
+    fi
+    if ! grep -q "alias ucas=" "$zshrc" 2>/dev/null; then
+      echo "alias ucas='uca status'" >> "$zshrc"
     fi
   fi
 
   # Add alias to .bashrc if not present
   if [ -f "$bashrc" ] && [ -w "$bashrc" ]; then
+    if grep -q "alias uca=" "$bashrc" 2>/dev/null; then
+      sed -i.bak '/alias uca=/d' "$bashrc" 2>/dev/null || true
+      rm -f "${bashrc}.bak" 2>/dev/null || true
+    fi
+    if ! grep -q "unalias uca" "$bashrc" 2>/dev/null; then
+      echo "unalias uca 2>/dev/null || true" >> "$bashrc"
+    fi
     if ! grep -q "alias ucas=" "$bashrc" 2>/dev/null; then
       echo "alias ucas='uca status'" >> "$bashrc"
     fi
   fi
 
   # Add alias to fish config if present
-  local fishrc="$HOME/.config/fish/config.fish"
   if [ -f "$fishrc" ] && [ -w "$fishrc" ]; then
     if ! grep -q "alias ucas=" "$fishrc" 2>/dev/null; then
       echo "alias ucas='uca status'" >> "$fishrc"
     fi
   fi
-  ok "Configured shell integration (alias ucas='uca status')"
+  ok "Configured shell integration (unaliased uca, set alias ucas='uca status')"
 }
 configure_shell_integration
 

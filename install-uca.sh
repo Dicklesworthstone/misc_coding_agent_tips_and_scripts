@@ -426,6 +426,14 @@ configure_shell_integration() {
       echo "alias ucas='uca status'" >> "$bashrc"
     fi
   fi
+
+  # Add alias to fish config if present
+  local fishrc="$HOME/.config/fish/config.fish"
+  if [ -f "$fishrc" ] && [ -w "$fishrc" ]; then
+    if ! grep -q "alias ucas=" "$fishrc" 2>/dev/null; then
+      echo "alias ucas='uca status'" >> "$fishrc"
+    fi
+  fi
   ok "Configured shell integration (alias ucas='uca status')"
 }
 configure_shell_integration

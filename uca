@@ -317,6 +317,21 @@ read_state_field() {
   grep -m 1 "$pattern" "$file" 2>/dev/null | sed -E 's/^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"?([^"]+)"?,?/\1/' | sed 's/,[[:space:]]*$//' || true
 }
 
+read_harness_version_from_state() {
+  local key="$1"
+  [ -f "$STATE_FILE" ] || return 0
+  awk -v k="\"$key\":" '
+    $0 ~ k { found=1 }
+    found && /"current_version":/ {
+      gsub(/.*"current_version":[[:space:]]*"/, "");
+      gsub(/".*/, "");
+      print;
+      exit;
+    }
+    found && /\}/ { found=0 }
+  ' "$STATE_FILE" 2>/dev/null || true
+}
+
 read_harness_prev_version_from_state() {
   local key="$1"
   [ -f "$STATE_FILE" ] || return 0
@@ -726,12 +741,11 @@ run_all_updates() {
   local upgraded_list=()
 
   # Load previous versions from state
-  PV_CLAUDE=$(read_state_field '"claude"' | head -1)
-  PV_CLAUDE=$(read_harness_prev_version_from_state "claude")
-  PV_CODEX=$(read_harness_prev_version_from_state "codex")
-  PV_AGY=$(read_harness_prev_version_from_state "agy")
-  PV_GROK=$(read_harness_prev_version_from_state "grok")
-  PV_OMP=$(read_harness_prev_version_from_state "omp")
+  PV_CLAUDE=$(read_harness_version_from_state "claude")
+  PV_CODEX=$(read_harness_version_from_state "codex")
+  PV_AGY=$(read_harness_version_from_state "agy")
+  PV_GROK=$(read_harness_version_from_state "grok")
+  PV_OMP=$(read_harness_version_from_state "omp")
 
   for h in "${harnesses[@]}"; do
     local h_name=""

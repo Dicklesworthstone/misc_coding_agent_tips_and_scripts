@@ -1204,6 +1204,14 @@ run_doctor_suite() {
     fi
   done
 
+  # 7. DET-PATH-ENV
+  local path_env_missing=0
+  if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]] && [ -d "$HOME/.local/bin" ]; then
+    path_env_missing=1
+    findings+=("DET-PATH-ENV: ~/.local/bin is not in current PATH")
+    fixes_planned+=("FIX-PATH-ENV: Add ~/.local/bin to PATH configuration in shell rc")
+  fi
+
   # Health-only mode
   if [ "$health_only" -eq 1 ]; then
     if [ "${#findings[@]}" -eq 0 ]; then
@@ -1308,6 +1316,20 @@ EOF
       fi
     done
 
+    # Fix 6: Path Environment
+    if [ "$path_env_missing" -eq 1 ]; then
+      for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+        if [ -f "$rc" ] && [ -w "$rc" ]; then
+          if ! grep -q 'export PATH=.*\.local/bin' "$rc" 2>/dev/null; then
+            doctor_mutate "$run_dir" "$rc" "append_line" "export PATH=\"\$HOME/.local/bin:\$PATH\""
+            echo -e "  ${C_GREEN}✔${C_RESET} [FIX-PATH-ENV] Added ~/.local/bin to $rc with backup"
+            fixes_applied+=("FIX-PATH-ENV")
+            break
+          fi
+        fi
+      done
+    fi
+
     echo -e "\n${C_GREEN}${C_BOLD}✔ Auto-repair complete (${#fixes_applied[@]} fixes applied).${C_RESET}"
     echo -e "${C_GRAY}To revert this repair run: uca doctor undo $(basename "$run_dir")${C_RESET}\n"
     return 0
@@ -1359,6 +1381,8 @@ EOF
       bin_path="$HOME/.local/bin/$bin_cand"
     elif [ -x "$HOME/.bun/bin/$bin_cand" ]; then
       bin_path="$HOME/.bun/bin/$bin_cand"
+    elif [ -x "$HOME/.grok/bin/$bin_cand" ]; then
+      bin_path="$HOME/.grok/bin/$bin_cand"
     fi
 
     if [ -n "$bin_path" ]; then

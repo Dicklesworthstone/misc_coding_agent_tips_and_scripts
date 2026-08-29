@@ -329,20 +329,36 @@ AGY_VER="Not installed"
 GROK_VER="Not installed"
 OMP_VER="Not installed"
 
+extract_clean_ver() {
+  local raw="$1"
+  local ver
+  ver=$(grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?(-[a-zA-Z0-9.]+)?' <<< "$raw" | head -1 || true)
+  if [ -n "$ver" ]; then
+    echo "$ver"
+  else
+    head -n 1 <<< "$raw" | cut -c 1-25 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  fi
+}
+
 if command -v claude &>/dev/null || [ -f "$HOME/.local/bin/claude" ]; then
-  CLAUDE_VER=$(claude --version 2>/dev/null || "$HOME/.local/bin/claude" --version 2>/dev/null || echo "Found")
+  raw=$(claude --version 2>/dev/null || "$HOME/.local/bin/claude" --version 2>/dev/null || echo "Found")
+  CLAUDE_VER=$(extract_clean_ver "$raw")
 fi
 if command -v codex &>/dev/null || [ -f "$HOME/.bun/bin/codex" ] || [ -f "$HOME/.local/bin/codex" ]; then
-  CODEX_VER=$(codex --version 2>/dev/null || "$HOME/.bun/bin/codex" --version 2>/dev/null || echo "Found")
+  raw=$(codex --version 2>/dev/null || "$HOME/.bun/bin/codex" --version 2>/dev/null || echo "Found")
+  CODEX_VER=$(extract_clean_ver "$raw")
 fi
 if command -v agy &>/dev/null || [ -f "$HOME/.local/bin/agy" ]; then
-  AGY_VER=$(agy --version 2>/dev/null || "$HOME/.local/bin/agy" --version 2>/dev/null || echo "Found")
+  raw=$(agy --version 2>/dev/null || "$HOME/.local/bin/agy" --version 2>/dev/null || echo "Found")
+  AGY_VER=$(extract_clean_ver "$raw")
 fi
 if command -v grok &>/dev/null || [ -f "$HOME/.grok/bin/grok" ] || [ -f "$HOME/.local/bin/grok" ]; then
-  GROK_VER=$(grok --version 2>/dev/null || "$HOME/.grok/bin/grok" --version 2>/dev/null || echo "Found")
+  raw=$(grok --version 2>/dev/null || "$HOME/.grok/bin/grok" --version 2>/dev/null || echo "Found")
+  GROK_VER=$(extract_clean_ver "$raw")
 fi
 if command -v omp &>/dev/null || [ -f "$HOME/.bun/bin/omp" ] || [ -f "$HOME/.local/bin/omp" ]; then
-  OMP_VER=$(omp --version 2>/dev/null || "$HOME/.bun/bin/omp" --version 2>/dev/null || echo "Found")
+  raw=$(omp --version 2>/dev/null || "$HOME/.bun/bin/omp" --version 2>/dev/null || echo "Found")
+  OMP_VER=$(extract_clean_ver "$raw")
 fi
 
 # Acquire / Install Binary

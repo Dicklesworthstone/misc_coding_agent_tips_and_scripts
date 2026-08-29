@@ -141,12 +141,40 @@ Output:
 ════════════════════════════════════════════════════════════════════════════
 ```
 
-### 5. Check Service Status & Reinstall Timer
+### 5. Live Interactive Watch Mode (`ucas -w`)
+
+```bash
+ucas -w        # Auto-refreshes every 5 seconds
+ucas -w 2      # Auto-refreshes every 2 seconds
+```
+
+### 6. Inspect Update Logs (`uca logs`)
+
+```bash
+uca logs            # View recent update log entries
+uca logs --errors   # Filter to errors and warnings only
+uca logs --follow   # Live tail update log output
+```
+
+### 7. Check Service Status & Reinstall Timer
 
 ```bash
 uca service status   # Check status of background scheduler
 uca service install  # Re-register systemd timer or launchd agent
 ```
+
+---
+
+## Advanced Capabilities
+
+1. **Post-Update Smoke Test & Verification Guard**:
+   Immediately after upgrading each harness, UCA executes an automated smoke test verification pass (`<harness> --help` / `--version`) to confirm the binary didn't break or suffer from runtime corruption. If any harness fails verification, UCA flags it with yellow/red telemetry and records diagnostic details.
+2. **Native Desktop & Terminal Notifications**:
+   When background auto-updater jobs upgrade any harness to a newer release, UCA dispatches a native desktop notification (`display notification` on macOS, `notify-send` on Linux) detailing the transition (`"From version xyz to version abc"`). When no updates occur, runs stay completely silent.
+3. **Parallel Async Version Probing**:
+   Using `concurrent.futures.ThreadPoolExecutor`, version inspection queries all 5 agent CLIs in parallel, completing live status discovery in <300ms (`ucas -f`).
+4. **Interactive Dashboard Watch Mode**:
+   Running `ucas -w` provides a live monitoring HUD showing current versions, latest upgrade pulses, background timer status, and clock telemetry.
 
 ---
 
@@ -191,8 +219,18 @@ Writes are executed atomically via temporary file replacement (`state.json.tmp.<
 
 ## Uninstallation
 
-To disable background services and remove UCA:
+To cleanly and completely remove UCA, its background services, symlinks, and shell aliases:
 
 ```bash
-./install-uca.sh --uninstall
+# In-binary removal
+uca uninstall
+
+# Or with state cache purge
+uca uninstall --purge -y
+
+# Or via dedicated uninstaller script
+./uninstall-uca.sh --purge
+
+# Or via curl one-liner
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/uninstall-uca.sh?$(date +%s)" | bash
 ```

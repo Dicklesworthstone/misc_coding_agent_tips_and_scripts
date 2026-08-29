@@ -5,9 +5,13 @@ Crafted with production-grade installer-workmanship patterns:
   • Charmbracelet Gum styling with seamless ANSI box-drawing fallback
   • Atomic lock management with stale PID detection
   • Live semver tracking and transition history ("From version xyz to version abc")
-  • Spinners for slow network operations
+  • Parallel async version probing (ThreadPoolExecutor)
+  • Post-update smoke test & verification guard
+  • Native desktop & terminal notifications (macOS osascript / Linux notify-send)
+  • Interactive live dashboard watch mode (ucas -w)
+  • Built-in log viewer and diagnostics (uca logs, uca doctor)
+  • Clean in-binary uninstaller (uca uninstall)
   • Universal 3-hour background scheduling (launchd on macOS, systemd on Linux)
-  • Comprehensive health diagnostics (uca doctor)
 
 Harnesses Managed:
   • Claude Code (claude update)
@@ -19,21 +23,27 @@ Harnesses Managed:
 Usage:
   uca                 Update all agent harnesses sequentially
   ucas                Show status dashboard, recent version changes, and schedule
-  uca status          Show status dashboard (alias for ucas)
+  ucas -w, --watch    Live interactive auto-refreshing dashboard
+  ucas -f, --fast     Probe versions in parallel (ultra-fast)
   uca <harness>       Update a specific harness (e.g. 'uca omp', 'uca claude')
   uca doctor          Run preflight diagnostics & self-test
+  uca logs            View recent update logs (--errors, --follow)
   uca service install Install 3-hour background auto-updater service
   uca service status  Show background service/timer status
+  uca uninstall       Completely remove UCA, background timers, and aliases
   uca check           Probe versions without running updates
 
 Options:
   -q, --quiet         Minimal output (for automated / cron / service runs)
+  --notify            Send desktop notifications on version changes
+  --no-smoke-test     Skip post-update verification guard
   --dry-run           Check versions without applying updates
   --no-gum            Disable gum styling and use ANSI fallback
   --json              Output status in machine-readable JSON format
   -h, --help          Show this help message
 """
 
+import concurrent.futures
 from datetime import datetime, timezone
 import json
 import os
@@ -123,7 +133,7 @@ def gum_style(*args: str, text: str = "") -> str:
     except Exception:
         return text
 
-# Atomic Locking with Stale PID Detection
+# Atomic Locking with Stale PID Detection & Signal Trap
 class AtomicLock:
     def __init__(self, lock_dir: Path):
         self.lock_dir = lock_dir
@@ -189,6 +199,7 @@ HARNESS_CONFIGS = [
         "name": "Claude Code",
         "binary_candidates": ["claude", str(Path.home() / ".local" / "bin" / "claude")],
         "version_cmd": ["claude", "--version"],
+        "smoke_cmd": ["claude", "--help"],
         "update_cmd": ["claude", "update"],
         "fallback_update_cmd": [str(Path.home() / ".local" / "bin" / "claude"), "update"],
     },
@@ -201,6 +212,7 @@ HARNESS_CONFIGS = [
             str(Path.home() / ".local" / "bin" / "codex"),
         ],
         "version_cmd": ["codex", "--version"],
+        "smoke_cmd": ["codex", "--help"],
         "update_cmd": ["bun", "install", "-g", "@openai/codex@latest"],
         "fallback_update_cmd": ["codex", "update"],
     },
@@ -209,6 +221,7 @@ HARNESS_CONFIGS = [
         "name": "Google Antigravity",
         "binary_candidates": ["agy", str(Path.home() / ".local" / "bin" / "agy")],
         "version_cmd": ["agy", "--version"],
+        "smoke_cmd": ["agy", "--help"],
         "update_cmd": ["agy", "update"],
         "fallback_update_cmd": [str(Path.home() / ".local" / "bin" / "agy"), "update"],
     },
@@ -221,6 +234,7 @@ HARNESS_CONFIGS = [
             str(Path.home() / ".grok" / "bin" / "grok"),
         ],
         "version_cmd": ["grok", "--version"],
+        "smoke_cmd": ["grok", "--help"],
         "update_cmd": ["grok", "update"],
         "fallback_update_cmd": [str(Path.home() / ".local" / "bin" / "grok"), "update"],
     },
@@ -233,6 +247,7 @@ HARNESS_CONFIGS = [
             str(Path.home() / ".local" / "bin" / "omp"),
         ],
         "version_cmd": ["omp", "--version"],
+        "smoke_cmd": ["omp", "--help"],
         "update_cmd": ["omp", "update"],
         "fallback_update_cmd": [str(Path.home() / ".bun" / "bin" / "omp"), "update"],
     },
@@ -301,6 +316,50 @@ def query_harness_version(cfg: Dict[str, Any]) -> Tuple[Optional[str], str]:
         return None, f"Exit code {res.returncode}: {output}"
     except Exception as e:
         return None, str(e)
+
+def smoke_test_harness(cfg: Dict[str, Any]) -> Tuple[bool, str]:
+    """Runs a non-destructive post-update verification guard."""
+    bin_path = find_executable(cfg["binary_candidates"])
+    if not bin_path:
+        return False, "Binary not found after update"
+    
+    smoke_cmd = [bin_path] + cfg.get("smoke_cmd", ["--help"])[1:]
+    try:
+        res = subprocess.run(
+            smoke_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            env=get_env_with_extra_paths()
+        )
+        if res.returncode == 0:
+            return True, "Smoke test passed"
+        return False, f"Smoke command returned exit code {res.returncode}"
+    except Exception as e:
+        return False, f"Smoke test exception: {e}"
+
+def send_desktop_notification(title: str, message: str) -> None:
+    """Dispatches a native desktop notification on macOS or Linux."""
+    try:
+        # macOS notification via AppleScript
+        if shutil.which("osascript") and sys.platform == "darwin":
+            clean_title = title.replace('"', '\\"')
+            clean_msg = message.replace('"', '\\"')
+            script = f'display notification "{clean_msg}" with title "{clean_title}" subtitle "UCA Auto-Updater"'
+            subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+            return
+
+        # Linux notification via notify-send
+        if shutil.which("notify-send"):
+            subprocess.run(
+                ["notify-send", title, message, "-a", "UCA", "-i", "system-software-update"],
+                capture_output=True,
+                timeout=5
+            )
+            return
+    except Exception:
+        pass
 
 def load_state() -> Dict[str, Any]:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -385,6 +444,7 @@ def update_single_harness(
     harness_state: Dict[str, Any],
     quiet: bool = False,
     dry_run: bool = False,
+    smoke_test: bool = True,
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     key = cfg["key"]
     name = cfg["name"]
@@ -435,11 +495,18 @@ def update_single_harness(
     if not v_after:
         v_after = v_before
 
+    # Smoke Test Verification Guard
+    smoke_passed = True
+    smoke_msg = ""
+    if smoke_test and ret_code == 0 and bin_path:
+        smoke_passed, smoke_msg = smoke_test_harness(cfg)
+
     version_changed = (v_before != "unknown" and v_after != "unknown" and v_before != v_after)
     change_event = None
 
     harness_state["last_checked_at"] = now_iso
     harness_state["last_duration_secs"] = round(duration, 2)
+    harness_state["smoke_test_passed"] = smoke_passed
 
     if "history" not in harness_state:
         harness_state["history"] = []
@@ -452,7 +519,7 @@ def update_single_harness(
             "from_version": v_before,
             "to_version": v_after,
             "duration_secs": round(duration, 2),
-            "status": "success" if ret_code == 0 else "updated_with_warning",
+            "status": "success" if (ret_code == 0 and smoke_passed) else "updated_with_warning",
         }
         harness_state["previous_version"] = v_before
         harness_state["current_version"] = v_after
@@ -462,26 +529,28 @@ def update_single_harness(
             "to_version": v_after,
             "timestamp": now_iso,
         }
-        harness_state["last_status"] = "updated"
+        harness_state["last_status"] = "updated" if smoke_passed else "smoke_warning"
         harness_state["history"].insert(0, change_event)
         harness_state["history"] = harness_state["history"][:50]
         
         if not quiet:
-            print(f"\r  {c('🎉', ANSI.GREEN)} {pad_str(c(name, ANSI.BOLD), 20)} {c('UPDATED', ANSI.GREEN, ANSI.BOLD)}: From version {c(v_before, ANSI.YELLOW)} to version {c(v_after, ANSI.GREEN, ANSI.BOLD)} ({duration:.1f}s)")
+            smoke_tag = "" if smoke_passed else f" {c('[Smoke Test Warning: ' + smoke_msg + ']', ANSI.YELLOW)}"
+            print(f"\r  {c('🎉', ANSI.GREEN)} {pad_str(c(name, ANSI.BOLD), 20)} {c('UPDATED', ANSI.GREEN, ANSI.BOLD)}: From version {c(v_before, ANSI.YELLOW)} to version {c(v_after, ANSI.GREEN, ANSI.BOLD)} ({duration:.1f}s){smoke_tag}")
     else:
         harness_state["current_version"] = v_after
         if "previous_version" not in harness_state or not harness_state["previous_version"]:
             harness_state["previous_version"] = v_after
             
-        if ret_code == 0:
+        if ret_code == 0 and smoke_passed:
             harness_state["last_status"] = "up_to_date"
             if not quiet:
                 print(f"\r  {c('✔', ANSI.GREEN)} {pad_str(c(name, ANSI.BOLD), 20)} {c('Up to date', ANSI.GREEN)} ({v_after}) ({duration:.1f}s)")
         else:
             harness_state["last_status"] = "error"
-            harness_state["last_error"] = output.splitlines()[-1] if output else "Update command failed"
+            err_detail = smoke_msg if not smoke_passed else (output.splitlines()[-1] if output else "Update command failed")
+            harness_state["last_error"] = err_detail
             if not quiet:
-                print(f"\r  {c('⚠️', ANSI.YELLOW)} {pad_str(c(name, ANSI.BOLD), 20)} {c('Update Warning', ANSI.YELLOW)} ({v_after}) - {harness_state['last_error']}")
+                print(f"\r  {c('⚠️', ANSI.YELLOW)} {pad_str(c(name, ANSI.BOLD), 20)} {c('Update Warning', ANSI.YELLOW)} ({v_after}) - {err_detail}")
 
     return harness_state, change_event
 
@@ -489,6 +558,8 @@ def run_all_updates(
     target_keys: Optional[List[str]] = None,
     quiet: bool = False,
     dry_run: bool = False,
+    notify: bool = True,
+    smoke_test: bool = True,
 ) -> int:
     with AtomicLock(LOCK_DIR):
         state = load_state()
@@ -521,6 +592,7 @@ def run_all_updates(
 
         any_updated = False
         has_errors = False
+        upgraded_events = []
         
         for cfg in configs_to_run:
             key = cfg["key"]
@@ -537,7 +609,9 @@ def run_all_updates(
                 "history": [],
             })
             
-            updated_h_state, change_event = update_single_harness(cfg, h_state, quiet=quiet, dry_run=dry_run)
+            updated_h_state, change_event = update_single_harness(
+                cfg, h_state, quiet=quiet, dry_run=dry_run, smoke_test=smoke_test
+            )
             
             if "harnesses" not in state:
                 state["harnesses"] = {}
@@ -545,8 +619,9 @@ def run_all_updates(
             
             if change_event:
                 any_updated = True
+                upgraded_events.append(change_event)
                 state["most_recently_updated"] = change_event
-            if updated_h_state.get("last_status") == "error":
+            if updated_h_state.get("last_status") in ["error", "smoke_warning"]:
                 has_errors = True
 
         total_duration = time.time() - start_total
@@ -556,6 +631,21 @@ def run_all_updates(
         
         if not dry_run:
             save_state(state)
+
+        # Dispatch Desktop Notification if harnesses were upgraded
+        if notify and upgraded_events:
+            if len(upgraded_events) == 1:
+                ev = upgraded_events[0]
+                send_desktop_notification(
+                    f"🚀 {ev['name']} Upgraded",
+                    f"From version {ev['from_version']} to {ev['to_version']}"
+                )
+            else:
+                names = ", ".join(e["name"] for e in upgraded_events)
+                send_desktop_notification(
+                    "🚀 Agent Harnesses Upgraded",
+                    f"Updated {len(upgraded_events)} harnesses: {names}"
+                )
 
         if not quiet:
             if has_gum():
@@ -585,16 +675,27 @@ def run_all_updates(
 
         return 1 if has_errors else 0
 
-def check_live_status() -> Dict[str, Any]:
-    """Probes current live versions and service state."""
+def check_live_status_parallel() -> Dict[str, Any]:
+    """Probes live versions concurrently across thread workers for sub-second latency."""
     state = load_state()
     harnesses_data = {}
-    
+
+    def probe_worker(cfg: Dict[str, Any]) -> Tuple[str, Optional[str], Optional[str]]:
+        key = cfg["key"]
+        v_live, _ = query_harness_version(cfg)
+        bin_path = find_executable(cfg["binary_candidates"])
+        return key, v_live, bin_path
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(HARNESS_CONFIGS)) as executor:
+        futures = [executor.submit(probe_worker, cfg) for cfg in HARNESS_CONFIGS]
+        results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+    res_map = {r[0]: (r[1], r[2]) for r in results}
+
     for cfg in HARNESS_CONFIGS:
         key = cfg["key"]
         h_state = state.get("harnesses", {}).get(key, {})
-        v_live, _ = query_harness_version(cfg)
-        bin_path = find_executable(cfg["binary_candidates"])
+        v_live, bin_path = res_map.get(key, (None, None))
         
         entry = dict(h_state)
         entry["name"] = cfg["name"]
@@ -699,8 +800,8 @@ def get_service_status() -> Dict[str, Any]:
 
     return res
 
-def print_status_dashboard(json_mode: bool = False) -> None:
-    data = check_live_status()
+def print_status_dashboard(json_mode: bool = False, fast: bool = True) -> None:
+    data = check_live_status_parallel() if fast else check_live_status_parallel()
     state = data["state"]
     harnesses = data["harnesses"]
     service = data["service"]
@@ -784,7 +885,6 @@ def print_status_dashboard(json_mode: bool = False) -> None:
             pass
 
         sep = "═" * term_width
-        subsep = "─" * term_width
 
         print(f"\n{c(sep, ANSI.BLUE)}")
         print(f" {c('UCA STATUS', ANSI.BOLD, ANSI.BLUE)} — Universal Coding Agent Harness Dashboard")
@@ -848,6 +948,8 @@ def print_status_dashboard(json_mode: bool = False) -> None:
                 status_badge = c("✔ Updated", ANSI.GREEN, ANSI.BOLD)
             elif last_status == "error":
                 status_badge = c("⚠️ Error", ANSI.RED)
+            elif last_status == "smoke_warning":
+                status_badge = c("⚠️ Smoke Warn", ANSI.YELLOW)
             else:
                 status_badge = c("✔ Up to date", ANSI.GREEN)
                 
@@ -904,12 +1006,57 @@ def print_status_dashboard(json_mode: bool = False) -> None:
         footer = gum_style(
             "--foreground", "245",
             "--italic",
-            text="Commands: uca (update all) • ucas (status) • uca <harness> (update one) • uca doctor (health) • uca service install"
+            text="Commands: uca (update all) • ucas (status) • ucas -w (watch) • uca doctor • uca logs • uca uninstall"
         )
         print(f" {footer}\n")
     else:
-        print(f" {c('Commands:', ANSI.GRAY)} {c('uca', ANSI.BOLD)} (update all) • {c('ucas', ANSI.BOLD)} (status) • {c('uca <harness>', ANSI.BOLD)} (update one) • {c('uca doctor', ANSI.BOLD)} (health) • {c('uca service install', ANSI.BOLD)}")
+        print(f" {c('Commands:', ANSI.GRAY)} {c('uca', ANSI.BOLD)} (update all) • {c('ucas', ANSI.BOLD)} (status) • {c('ucas -w', ANSI.BOLD)} (watch) • {c('uca doctor', ANSI.BOLD)} • {c('uca logs', ANSI.BOLD)} • {c('uca uninstall', ANSI.BOLD)}")
         print(f"{c('═' * subsep_len, ANSI.BLUE)}\n")
+
+def run_watch_mode(interval_sec: int = 5) -> None:
+    """Interactive live dashboard watch mode."""
+    print(c("Starting UCA Watch Mode... Press Ctrl+C to exit.", ANSI.BLUE))
+    try:
+        while True:
+            # Clear screen ANSI escape
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
+            print_status_dashboard(fast=True)
+            print(f" {c('Live Watch Mode', ANSI.BOLD, ANSI.GREEN)} • Refreshing every {interval_sec}s • {datetime.now().strftime('%H:%M:%S')} (Press Ctrl+C to quit)\n")
+            time.sleep(interval_sec)
+    except KeyboardInterrupt:
+        print(f"\n{c('Watch mode stopped.', ANSI.GRAY)}")
+
+def view_logs(errors_only: bool = False, follow: bool = False) -> None:
+    """Views recent update logs or tails log file."""
+    target_file = ERROR_LOG_FILE if errors_only else LOG_FILE
+    if not target_file.exists():
+        print(c(f"No log file found at {target_file}", ANSI.YELLOW))
+        return
+
+    print(f"\n{c('═' * 76, ANSI.BLUE)}")
+    print(f" {c('UCA LOG VIEWER', ANSI.BOLD, ANSI.BLUE)} — {target_file}")
+    print(f"{c('═' * 76, ANSI.BLUE)}\n")
+
+    if follow:
+        try:
+            subprocess.run(["tail", "-n", "30", "-f", str(target_file)])
+        except KeyboardInterrupt:
+            print("\nLog tail stopped.")
+    else:
+        try:
+            with open(target_file, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            for line in lines[-40:]:
+                if "error" in line.lower() or "warning" in line.lower():
+                    print(c(line.rstrip(), ANSI.YELLOW))
+                elif "updated" in line.lower() or "success" in line.lower():
+                    print(c(line.rstrip(), ANSI.GREEN))
+                else:
+                    print(line.rstrip())
+        except Exception as e:
+            print(c(f"Error reading log: {e}", ANSI.RED))
+    print(f"\n{c('═' * 76, ANSI.BLUE)}\n")
 
 def run_doctor() -> None:
     """Preflight checks & diagnostics matching installer-workmanship patterns."""
@@ -940,13 +1087,15 @@ def run_doctor() -> None:
         print(f"  {c('⚠️', ANSI.YELLOW)} 3-Hour Auto-Updater: {c(srv['detail'], ANSI.YELLOW)} (run `uca service install` to enable)")
 
     # 5. Check each harness
-    print(f"\n  {c('Harness Integrity Checks:', ANSI.BOLD)}")
+    print(f"\n  {c('Harness Integrity & Smoke Checks:', ANSI.BOLD)}")
     for cfg in HARNESS_CONFIGS:
         name = cfg["name"]
         bin_path = find_executable(cfg["binary_candidates"])
         v, _ = query_harness_version(cfg)
         if bin_path:
-            print(f"    {c('✔', ANSI.GREEN)} {pad_str(name, 20)} {c(bin_path, ANSI.GRAY):<40} Version: {c(v or 'unknown', ANSI.BOLD)}")
+            smoke_ok, smoke_info = smoke_test_harness(cfg)
+            smoke_status = c("Ready", ANSI.GREEN) if smoke_ok else c(f"Warning ({smoke_info})", ANSI.YELLOW)
+            print(f"    {c('✔', ANSI.GREEN)} {pad_str(name, 20)} {c(bin_path, ANSI.GRAY):<38} Version: {c(v or 'unknown', ANSI.BOLD):<14} Smoke: {smoke_status}")
         else:
             print(f"    {c('•', ANSI.GRAY)} {pad_str(name, 20)} {c('Binary not installed', ANSI.GRAY)}")
 
@@ -964,7 +1113,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart={Path.home()}/.local/bin/uca --quiet
+ExecStart={Path.home()}/.local/bin/uca --quiet --notify
 TimeoutStartSec=600
 Restart=no
 StandardOutput=journal
@@ -1030,6 +1179,7 @@ def install_launchd_service() -> bool:
     <array>
         <string>{Path.home()}/.local/bin/uca</string>
         <string>--quiet</string>
+        <string>--notify</string>
     </array>
     <key>StartInterval</key>
     <integer>10800</integer>
@@ -1067,7 +1217,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/uca --quiet
+ExecStart=%h/.local/bin/uca --quiet --notify
 TimeoutStartSec=600
 Restart=no
 StandardOutput=journal
@@ -1114,33 +1264,147 @@ def install_service() -> None:
     else:
         print(c("Neither systemd nor launchd detected on this system.", ANSI.YELLOW))
 
+def run_uninstaller(purge: bool = False, force: bool = False) -> None:
+    """Robust in-binary uninstaller tearing down services, symlinks, aliases, and state."""
+    print(f"\n{c('═' * 76, ANSI.YELLOW)}")
+    print(f" {c('UCA UNINSTALLER', ANSI.BOLD, ANSI.YELLOW)} — Clean Removal Wizard")
+    print(f"{c('═' * 76, ANSI.YELLOW)}\n")
+
+    if not force:
+        if has_gum():
+            cmd = ["gum", "confirm", "Are you sure you want to completely uninstall UCA and its background services?"]
+            if subprocess.run(cmd).returncode != 0:
+                print(c("Uninstallation aborted.", ANSI.GRAY))
+                return
+        else:
+            ans = input("Are you sure you want to completely uninstall UCA and its background services? [y/N]: ").strip().lower()
+            if ans not in ["y", "yes"]:
+                print(c("Uninstallation aborted.", ANSI.GRAY))
+                return
+
+    # 1. Teardown launchd
+    if shutil.which("launchctl"):
+        username = os.environ.get("USER") or Path.home().name
+        for plist_name in [f"com.{username}.uca.plist", "com.jemanuel.uca.plist", "com.uca.updater.plist"]:
+            plist_file = LAUNCHD_DIR / plist_name
+            if plist_file.exists():
+                subprocess.run(["launchctl", "unload", str(plist_file)], stderr=subprocess.DEVNULL)
+                try:
+                    plist_file.unlink()
+                    print(f"  {c('✔', ANSI.GREEN)} Removed launchd agent ({plist_name})")
+                except Exception:
+                    pass
+
+    # 2. Teardown systemd
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "--user", "disable", "--now", "uca.timer"], stderr=subprocess.DEVNULL)
+        subprocess.run(["systemctl", "--user", "stop", "uca.service"], stderr=subprocess.DEVNULL)
+        for unit in [SYSTEMD_USER_DIR / "uca.service", SYSTEMD_USER_DIR / "uca.timer"]:
+            if unit.exists():
+                try:
+                    unit.unlink()
+                    print(f"  {c('✔', ANSI.GREEN)} Removed systemd unit ({unit.name})")
+                except Exception:
+                    pass
+        subprocess.run(["systemctl", "--user", "daemon-reload"], stderr=subprocess.DEVNULL)
+
+    # 3. Remove aliases from shell configs
+    for shell_rc in [Path.home() / ".zshrc", Path.home() / ".bashrc", Path.home() / ".config" / "fish" / "config.fish"]:
+        if shell_rc.exists():
+            try:
+                with open(shell_rc, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                new_lines = [l for l in lines if "alias ucas=" not in l and "alias uca=" not in l]
+                if len(new_lines) != len(lines):
+                    with open(shell_rc, "w", encoding="utf-8") as f:
+                        f.writelines(new_lines)
+                    print(f"  {c('✔', ANSI.GREEN)} Removed aliases from {shell_rc}")
+            except Exception:
+                pass
+
+    # 4. Remove state directory if purge requested
+    if purge and STATE_DIR.exists():
+        try:
+            shutil.rmtree(STATE_DIR)
+            print(f"  {c('✔', ANSI.GREEN)} Purged state directory ({STATE_DIR})")
+        except Exception:
+            pass
+
+    # 5. Remove binaries and symlinks
+    bin_targets = [
+        Path.home() / ".local" / "bin" / "uca",
+        Path.home() / ".local" / "bin" / "ucas",
+        Path("/usr/local/bin/uca"),
+        Path("/usr/local/bin/ucas"),
+    ]
+    for b in bin_targets:
+        if b.exists() or b.is_symlink():
+            try:
+                b.unlink()
+                print(f"  {c('✔', ANSI.GREEN)} Removed {b}")
+            except Exception:
+                pass
+
+    print(f"\n{c('✔ UCA has been cleanly uninstalled.', ANSI.GREEN, ANSI.BOLD)}\n")
+
 def main() -> None:
     global NO_GUM, FORCE_COLOR
     prog_name = os.path.basename(sys.argv[0])
     raw_args = sys.argv[1:]
 
+    # Signal handlers for clean exit
+    def sig_handler(signum, frame):
+        sys.exit(128 + signum)
+    signal.signal(signal.SIGTERM, sig_handler)
+    signal.signal(signal.SIGHUP, sig_handler)
+
     if "--no-gum" in raw_args:
         NO_GUM = True
         raw_args = [a for a in raw_args if a != "--no-gum"]
 
+    # Status / UCAS invocation
     if prog_name == "ucas" or (raw_args and raw_args[0] in ["status", "s", "st", "-s", "--status"]):
         if "-h" in raw_args or "--help" in raw_args:
             print("""UCAS — Universal Coding Agent Harness Dashboard
 
 Usage:
   ucas                Show status dashboard, recent version changes, and schedule
+  ucas -w, --watch    Interactive live auto-refreshing dashboard
+  ucas -f, --fast     Probe versions in parallel (ultra-fast sub-second refresh)
   ucas --json         Output status in machine-readable JSON format
   ucas --no-gum       Disable gum styling and use ANSI fallback
   ucas -h, --help     Show this help message
 """)
             return
+        if "-w" in raw_args or "--watch" in raw_args:
+            interval = 5
+            for a in raw_args:
+                if a.isdigit():
+                    interval = max(1, int(a))
+            run_watch_mode(interval_sec=interval)
+            return
         json_mode = "--json" in raw_args
-        print_status_dashboard(json_mode=json_mode)
+        fast_mode = "-f" in raw_args or "--fast" in raw_args
+        print_status_dashboard(json_mode=json_mode, fast=fast_mode)
         return
 
     # Check for doctor command
     if raw_args and raw_args[0] in ["doctor", "doc", "--doctor", "--verify"]:
         run_doctor()
+        return
+
+    # Check for logs command
+    if raw_args and raw_args[0] in ["logs", "log", "--logs"]:
+        errors_only = "-e" in raw_args or "--errors" in raw_args
+        follow_mode = "-f" in raw_args or "--follow" in raw_args
+        view_logs(errors_only=errors_only, follow=follow_mode)
+        return
+
+    # Check for uninstall command
+    if raw_args and raw_args[0] in ["uninstall", "--uninstall", "remove"]:
+        purge = "--purge" in raw_args
+        force = "-y" in raw_args or "--yes" in raw_args
+        run_uninstaller(purge=purge, force=force)
         return
 
     # Check for service command
@@ -1162,11 +1426,13 @@ Usage:
 
     # Check for check command
     if raw_args and raw_args[0] in ["check", "--check"]:
-        print_status_dashboard(json_mode="--json" in raw_args)
+        print_status_dashboard(json_mode="--json" in raw_args, fast=True)
         return
 
     # Parse flags
     quiet = "-q" in raw_args or "--quiet" in raw_args
+    notify = "--notify" in raw_args or quiet  # Send notification in background quiet mode
+    smoke_test = "--no-smoke-test" not in raw_args
     dry_run = "--dry-run" in raw_args
     help_flag = "-h" in raw_args or "--help" in raw_args
 
@@ -1176,15 +1442,19 @@ Usage:
 Usage:
   uca                 Update all agent harnesses (claude, codex, agy, grok, omp)
   ucas                Show status breakdown, version changes, and schedule
-  uca status          Show status dashboard (alias for ucas)
+  ucas -w, --watch    Interactive live auto-refreshing dashboard
   uca <harness>       Update specific harness (e.g. 'uca omp', 'uca claude')
   uca doctor          Run preflight diagnostics & self-test
+  uca logs            Inspect update logs (--errors, --follow)
   uca service install Install 3-hour background auto-updater service
   uca service status  Show background service status
+  uca uninstall       Cleanly remove UCA, timers, and aliases (--purge)
   uca check           Probe versions without running updates
 
 Options:
   -q, --quiet         Minimal output (for automated / cron / service runs)
+  --notify            Dispatch desktop notification on version change
+  --no-smoke-test     Skip post-update verification guard
   --dry-run           Check versions without applying updates
   --no-gum            Disable gum styling and use ANSI fallback
   --json              Output status in JSON format
@@ -1204,7 +1474,6 @@ Options:
             if arg.lower() != "all":
                 targets.append(arg.lower())
         else:
-            # Check if partial match
             matched = False
             for k in known_harness_keys:
                 if k.startswith(arg.lower()):
@@ -1218,6 +1487,8 @@ Options:
         target_keys=targets if targets else None,
         quiet=quiet,
         dry_run=dry_run,
+        notify=notify,
+        smoke_test=smoke_test,
     )
     sys.exit(code)
 

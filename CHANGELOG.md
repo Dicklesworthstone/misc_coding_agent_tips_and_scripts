@@ -12,9 +12,10 @@ This project has no formal versioning or GitHub Releases. There are no tags. Cha
 
 A production-grade CLI and telemetry system for managing updates across 5 AI coding agent harnesses (**Claude Code**, **OpenAI Codex**, **Google Antigravity**, **xAI Grok**, and **OMP**). Includes automatic 3-hour background scheduling (systemd user timers on Linux and launchd on macOS), Charmbracelet Gum dashboard visualization with dual-path ANSI fallback, live version change tracking (`"From version xyz to version abc"`), atomic locking with stale PID protection, and health diagnostics (`uca doctor`). Built following the `/installer-workmanship` standard.
 
-**Initial release** (2026-08-29):
-- Add `uca` (main updater & dashboard engine)
+**Initial release & feature expansion** (2026-08-29):
+- Add `uca` (main updater, telemetry engine, watch mode, smoke test guard, notifications, log viewer, and in-binary uninstaller)
 - Add `install-uca.sh` (workmanship-compliant installer with preflight, atomic lock, and diagnostics)
+- Add `uninstall-uca.sh` (dedicated standalone uninstaller with Gum confirmation and service teardown)
 - Add `UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md` (comprehensive documentation guide)
 
 ---
@@ -367,6 +368,7 @@ Current files in the repository (latest commit on main: [`25d8243`](https://gith
 | `cc_session_making_encrypted_gh_issues_system.html` | Session Transcript |
 | `uca` | AI Agent Management |
 | `install-uca.sh` | AI Agent Management |
+| `uninstall-uca.sh` | AI Agent Management |
 | `UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md` | AI Agent Management |
 | `gh_og_share_image.png` | Branding |
 | `LICENSE` | MIT + OpenAI/Anthropic Rider |

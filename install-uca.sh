@@ -367,16 +367,14 @@ fi
 # Acquire / Install Binary
 install_uca_script() {
   local src_file=""
-  if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/uca" ]; then
+  if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/uca" ] && [ "$SCRIPT_DIR/uca" != "$BINARY_PATH" ]; then
     src_file="$SCRIPT_DIR/uca"
-  elif [ -f "./uca" ]; then
+  elif [ -f "./uca" ] && [ "$(pwd)/uca" != "$BINARY_PATH" ]; then
     src_file="./uca"
-  elif [ -f "$HOME/.local/bin/uca" ]; then
-    src_file="$HOME/.local/bin/uca"
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    echo "  would install $src_file -> $BINARY_PATH"
+    echo "  would install ${src_file:-<remote>} -> $BINARY_PATH"
     echo "  would symlink $BINARY_PATH -> $SYMLINK_PATH"
     return 0
   fi
@@ -388,10 +386,12 @@ install_uca_script() {
   if [ -n "$src_file" ] && [ -f "$src_file" ]; then
     cp -f "$src_file" "$BINARY_PATH"
   else
-    # Download or embedded fallback
+    # Download from remote repository
     local remote_url="https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/uca"
     if curl -fsSL ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "$remote_url" -o "$TEMP_DIR/uca" 2>/dev/null; then
       cp -f "$TEMP_DIR/uca" "$BINARY_PATH"
+    elif [ -f "$BINARY_PATH" ]; then
+      ok "Using existing $BINARY_PATH (download unreachable)"
     else
       err "Could not find local uca script or download from repository."
       exit 1

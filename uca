@@ -126,6 +126,7 @@ draw_box() {
   local color_code="$1"; shift
   local lines=("$@")
   local max_len=0
+  local i
   for l in "${lines[@]}"; do
     local clean len
     clean=$(strip_ansi "$l")
@@ -314,7 +315,7 @@ update_harness() {
 read_state_field() {
   local pattern="$1" file="${2:-$STATE_FILE}"
   [ -f "$file" ] || return 0
-  grep -m 1 "$pattern" "$file" 2>/dev/null | sed -E 's/^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"?([^"]+)"?,?/\1/' | sed 's/,[[:space:]]*$//' || true
+  grep -m 1 "$pattern" "$file" 2>/dev/null | sed -E 's/^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"?([^"]*)"?,?/\1/' | sed 's/,[[:space:]]*$//' || true
 }
 
 read_harness_version_from_state() {
@@ -443,7 +444,10 @@ get_service_status() {
 # Relative Time Formatter
 format_relative_time() {
   local iso_str="$1"
-  [ -z "$iso_str" ] && { echo "Never"; return; }
+  if [ -z "$iso_str" ] || [ "$iso_str" = "null" ]; then
+    echo "Never"
+    return
+  fi
   
   local ts_now ts_past diff mins hours days
   ts_now=$(date +%s)
@@ -571,7 +575,7 @@ show_status_dashboard() {
     fi
   else
     local term_width=116
-    local sep=""
+    local sep="" i
     for ((i=0; i<term_width; i++)); do sep="${sep}═"; done
 
     echo -e "\n\033[38;5;39m${sep}\033[0m"
@@ -739,6 +743,12 @@ run_all_updates() {
   local any_updated=0 has_errors=0
   local mru_key="" mru_from="" mru_to="" mru_ts=""
   local upgraded_list=()
+
+  # Load previous MRU from state
+  mru_key=$(read_state_field '"key"')
+  mru_from=$(read_state_field '"from_version"')
+  mru_to=$(read_state_field '"to_version"')
+  mru_ts=$(read_state_field '"timestamp"')
 
   # Load previous versions from state
   PV_CLAUDE=$(read_harness_version_from_state "claude")
@@ -1531,7 +1541,7 @@ run_uninstaller() {
   # Stop launchd
   if [ "$(uname -s)" = "Darwin" ] && command -v launchctl &>/dev/null; then
     local current_user="${USER:-$(whoami 2>/dev/null || echo "user")}"
-    for plist_name in "com.${current_user}.uca.plist" "com.jemanuel.uca.plist" "com.uca.updater.plist"; do
+    for plist_name in "com.${current_user}.uca.plist" "com.uca.updater.plist"; do
       local plist_file="$LAUNCHD_DIR/$plist_name"
       if [ -f "$plist_file" ]; then
         launchctl unload "$plist_file" 2>/dev/null || true

@@ -110,7 +110,7 @@ info "Removing UCA background services and binaries..."
 # 1. Stop and remove macOS launchd service
 if [ "$(uname -s)" = "Darwin" ]; then
   current_user="${USER:-$(whoami 2>/dev/null || echo "user")}"
-  for plist_name in "com.${current_user}.uca.plist" "com.jemanuel.uca.plist" "com.uca.updater.plist"; do
+  for plist_name in "com.${current_user}.uca.plist" "com.uca.updater.plist"; do
     plist_file="$HOME/Library/LaunchAgents/$plist_name"
     if [ -f "$plist_file" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then

@@ -160,7 +160,7 @@ draw_box() {
   done
 
   local width=$((max_len + 4))
-  local border=""
+  local border="" i
   for ((i=0; i<width; i++)); do border+="═"; done
 
   echo -e "\033[38;5;${color_code}m╔${border}╗\033[0m"
@@ -250,7 +250,7 @@ uninstall_flow() {
   # Stop launchd
   if [ "$OS" = "darwin" ]; then
     local current_user="${USER:-$(whoami 2>/dev/null || echo "user")}"
-    for plist_name in "com.${current_user}.uca.plist" "com.jemanuel.uca.plist" "com.uca.updater.plist"; do
+    for plist_name in "com.${current_user}.uca.plist" "com.uca.updater.plist"; do
       local plist_file="$HOME/Library/LaunchAgents/$plist_name"
       if [ -f "$plist_file" ]; then
         launchctl unload "$plist_file" 2>/dev/null || true

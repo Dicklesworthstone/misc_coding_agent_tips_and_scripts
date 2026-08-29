@@ -623,8 +623,16 @@ def get_service_status() -> Dict[str, Any]:
     # Check launchd (macOS)
     if shutil.which("launchctl"):
         res["type"] = "launchd"
-        plist_path = LAUNCHD_DIR / "com.jemanuel.uca.plist"
-        if plist_path.exists():
+        username = os.environ.get("USER") or Path.home().name
+        labels_to_check = [f"com.{username}.uca", "com.jemanuel.uca", "com.uca.updater"]
+        found_plist = None
+        for lbl in labels_to_check:
+            cand = LAUNCHD_DIR / f"{lbl}.plist"
+            if cand.exists():
+                found_plist = cand
+                break
+                
+        if found_plist:
             try:
                 r = subprocess.run(
                     ["launchctl", "list"],
@@ -633,11 +641,16 @@ def get_service_status() -> Dict[str, Any]:
                     text=True,
                     timeout=5,
                 )
-                if "com.jemanuel.uca" in r.stdout:
+                matched_label = None
+                for lbl in labels_to_check:
+                    if lbl in r.stdout:
+                        matched_label = lbl
+                        break
+                if matched_label:
                     res["active"] = True
                     detail_extra = ""
                     for line in r.stdout.splitlines():
-                        if "com.jemanuel.uca" in line:
+                        if matched_label in line:
                             parts = line.split()
                             if len(parts) >= 2:
                                 exit_code = parts[1]
@@ -1001,7 +1014,9 @@ WantedBy=timers.target
 def install_launchd_service() -> bool:
     """Installs and enables macOS launchd agent (every 3 hours = 10800s)."""
     LAUNCHD_DIR.mkdir(parents=True, exist_ok=True)
-    plist_path = LAUNCHD_DIR / "com.jemanuel.uca.plist"
+    username = os.environ.get("USER") or Path.home().name
+    plist_label = f"com.{username}.uca"
+    plist_path = LAUNCHD_DIR / f"{plist_label}.plist"
     
     path_env = f"{Path.home()}/.local/bin:{Path.home()}/.bun/bin:{Path.home()}/.grok/bin:{Path.home()}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     
@@ -1010,7 +1025,7 @@ def install_launchd_service() -> bool:
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.jemanuel.uca</string>
+    <string>{plist_label}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{Path.home()}/.local/bin/uca</string>
@@ -1084,7 +1099,7 @@ WantedBy=timers.target
     try:
         subprocess.run(["launchctl", "unload", str(plist_path)], stderr=subprocess.DEVNULL)
         subprocess.run(["launchctl", "load", "-w", str(plist_path)], check=True)
-        print(f"{c('✔', ANSI.GREEN)} Loaded launchd agent {c('com.jemanuel.uca', ANSI.BOLD)} (runs every 3 hours)")
+        print(f"{c('✔', ANSI.GREEN)} Loaded launchd agent {c(plist_label, ANSI.BOLD)} (runs every 3 hours)")
         return True
     except Exception as e:
         print(f"{c('⚠️', ANSI.YELLOW)} launchctl command failed: {e}")

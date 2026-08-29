@@ -7,6 +7,10 @@
 # Beads daemon logs
 .beads/daemon-*.log.gz
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
 # Editor artifacts
 *.swp
 *.swo

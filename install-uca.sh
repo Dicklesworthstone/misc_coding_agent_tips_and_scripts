@@ -248,12 +248,15 @@ if [ "$UNINSTALL" -eq 1 ]; then
 
   # Stop launchd
   if [ "$OS" = "darwin" ]; then
-    LAUNCHD_PLIST="$HOME/Library/LaunchAgents/com.jemanuel.uca.plist"
-    if [ -f "$LAUNCHD_PLIST" ]; then
-      launchctl unload "$LAUNCHD_PLIST" 2>/dev/null || true
-      rm -f "$LAUNCHD_PLIST" 2>/dev/null || true
-      ok "Removed launchd agent"
-    fi
+    local current_user="${USER:-$(whoami 2>/dev/null || echo "user")}"
+    for plist_name in "com.${current_user}.uca.plist" "com.jemanuel.uca.plist" "com.uca.updater.plist"; do
+      local plist_file="$HOME/Library/LaunchAgents/$plist_name"
+      if [ -f "$plist_file" ]; then
+        launchctl unload "$plist_file" 2>/dev/null || true
+        rm -f "$plist_file" 2>/dev/null || true
+        ok "Removed launchd agent ($plist_name)"
+      fi
+    done
   fi
 
   # Stop systemd
@@ -354,7 +357,7 @@ install_uca_script() {
   else
     # Download or embedded fallback
     local remote_url="https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/main/uca"
-    if curl -fsSL "${PROXY_ARGS[@]}" "$remote_url" -o "$TEMP_DIR/uca" 2>/dev/null; then
+    if curl -fsSL ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "$remote_url" -o "$TEMP_DIR/uca" 2>/dev/null; then
       cp -f "$TEMP_DIR/uca" "$BINARY_PATH"
     else
       err "Could not find local uca script or download from repository."

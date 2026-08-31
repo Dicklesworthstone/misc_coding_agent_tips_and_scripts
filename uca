@@ -19,7 +19,7 @@
 #
 # Harnesses Managed:
 #   • Claude Code        (claude update)
-#   • OpenAI Codex       (bun install -g @openai/codex@latest / codex update)
+#   • OpenAI Codex       (ownership-aware: bun / npm / standalone installer / codex update)
 #   • Google Antigravity (agy update)
 #   • xAI Grok           (grok update)
 #   • OMP                (omp update)
@@ -287,6 +287,90 @@ smoke_test_harness() {
   return 1
 }
 
+# Codex Ownership-Aware Updater (issue #8)
+# The presence of bun must NOT imply bun owns codex: OpenAI's standalone
+# installer (curl -fsSL https://chatgpt.com/codex/install.sh | sh) puts a
+# native binary under ~/.codex/packages/standalone/ linked from
+# ~/.local/bin/codex. Blindly running `bun install -g` would create a
+# second codex under ~/.bun/bin and leave the active install stale.
+# So: resolve the active binary, classify its owner by realpath, and
+# update through the matching method only.
+CODEX_UPDATE_WARNING=""
+
+resolve_codex_binary() {
+  local p
+  p=$(command -v codex 2>/dev/null || true)
+  [ -z "$p" ] && [ -x "$HOME/.local/bin/codex" ] && p="$HOME/.local/bin/codex"
+  [ -z "$p" ] && [ -x "$HOME/.bun/bin/codex" ] && p="$HOME/.bun/bin/codex"
+  [ -n "$p" ] && echo "$p"
+}
+
+resolve_real_path() {
+  local p="$1"
+  realpath "$p" 2>/dev/null || readlink -f "$p" 2>/dev/null || echo "$p"
+}
+
+classify_codex_owner() {
+  local real="$1" npm_root
+  case "$real" in
+    "$HOME/.bun/bin/"*)                  echo "bun";        return 0 ;;
+    "$HOME/.codex/packages/standalone/"*) echo "standalone"; return 0 ;;
+  esac
+  if command -v npm &>/dev/null; then
+    npm_root=$(npm root -g 2>/dev/null || true)
+    if [ -n "$npm_root" ] && [[ "$real" == "$npm_root/"* ]]; then
+      echo "npm"
+      return 0
+    fi
+  fi
+  echo "unknown"
+}
+
+binary_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo ""
+}
+
+update_codex() {
+  CODEX_UPDATE_WARNING=""
+  local bin real owner ver_before ver_after mtime_before mtime_after ret=0
+
+  bin=$(resolve_codex_binary)
+  [ -z "$bin" ] && return 1
+  real=$(resolve_real_path "$bin")
+  owner=$(classify_codex_owner "$real")
+
+  ver_before=$("$bin" --version 2>/dev/null || true)
+  mtime_before=$(binary_mtime "$real")
+
+  case "$owner" in
+    bun)
+      bun install -g @openai/codex@latest 2>&1 || ret=$? ;;
+    npm)
+      npm install -g @openai/codex@latest 2>&1 || ret=$? ;;
+    standalone|*)
+      # Standalone installer (or unknown ownership): use codex's own
+      # updater rather than guessing a package manager.
+      "$bin" update 2>&1 || ret=$? ;;
+  esac
+  [ "$ret" -ne 0 ] && return "$ret"
+
+  # Post-verify: re-resolve the active binary and confirm the install we
+  # updated is the one PATH actually serves.
+  local active active_real
+  active=$(command -v codex 2>/dev/null || echo "$bin")
+  active_real=$(resolve_real_path "$active")
+  real=$(resolve_real_path "$bin")   # symlink target may have moved (standalone version dirs)
+  ver_after=$("$active" --version 2>/dev/null || true)
+  mtime_after=$(binary_mtime "$real")
+
+  if [ "$active_real" != "$real" ]; then
+    CODEX_UPDATE_WARNING="Updated codex at $bin ($owner), but 'codex' on PATH resolves to $active — the updated install may be shadowed by an earlier-PATH binary."
+  elif [ "$ver_after" = "$ver_before" ] && [ -n "$mtime_before" ] && [ "$mtime_after" = "$mtime_before" ]; then
+    : # untouched binary: already up to date (normal) — caller reports version status
+  fi
+  return 0
+}
+
 # Update Harness Command Executor
 update_harness() {
   local key="$1"
@@ -294,14 +378,7 @@ update_harness() {
     claude)
       if command -v claude &>/dev/null; then claude update 2>&1; else "$HOME/.local/bin/claude" update 2>&1; fi ;;
     codex)
-      if command -v bun &>/dev/null; then
-        bun install -g @openai/codex@latest 2>&1
-      elif command -v codex &>/dev/null; then
-        codex update 2>&1
-      else
-        return 1
-      fi
-      ;;
+      update_codex ;;
     agy)
       if command -v agy &>/dev/null; then agy update 2>&1; else "$HOME/.local/bin/agy" update 2>&1; fi ;;
     grok)
@@ -782,6 +859,7 @@ run_all_updates() {
     [ "$quiet" -eq 0 ] && echo -ne "  ${C_BLUE}⟳${C_RESET} Updating ${C_BOLD}${h_name}${C_RESET}..."
 
     local h_start h_dur ret
+    CODEX_UPDATE_WARNING=""
     h_start=$(date +%s)
     if update_harness "$h" >/dev/null 2>&1; then
       ret=0
@@ -845,6 +923,12 @@ run_all_updates() {
           echo -e "\r  ${C_YELLOW}⚠️${C_RESET} $(pad_str "${C_BOLD}${h_name}${C_RESET}" 20) ${C_YELLOW}Update Warning${C_RESET} (${v_after})"
         fi
       fi
+    fi
+
+    # Surface codex shadow-install warnings (issue #8) even though
+    # update_harness output itself is discarded.
+    if [ "$h" = "codex" ] && [ -n "$CODEX_UPDATE_WARNING" ] && [ "$quiet" -eq 0 ]; then
+      echo -e "     ${C_YELLOW}⚠ ${CODEX_UPDATE_WARNING}${C_RESET}"
     fi
   done
 

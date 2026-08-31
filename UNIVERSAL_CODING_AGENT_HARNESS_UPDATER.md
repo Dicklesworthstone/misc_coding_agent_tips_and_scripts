@@ -29,7 +29,7 @@ cd misc_coding_agent_tips_and_scripts
 | Harness | Target Binary | Update Command |
 |:---|:---|:---|
 | **Claude Code** | `~/.local/bin/claude` | `claude update` |
-| **OpenAI Codex** | `~/.bun/bin/codex` | `bun install -g @openai/codex@latest` (fallback `codex update`) |
+| **OpenAI Codex** | active `codex` on PATH | Ownership-aware: `bun install -g` if the resolved binary lives under `~/.bun/bin`, `npm install -g` if under the npm global prefix, `codex update` for the standalone installer (`~/.codex/packages/standalone/`) or unknown installs |
 | **Google Antigravity** | `~/.local/bin/agy` | `agy update` |
 | **xAI Grok** | `~/.grok/bin/grok` | `grok update` |
 | **OMP** | `~/.bun/bin/omp` | `omp update` |

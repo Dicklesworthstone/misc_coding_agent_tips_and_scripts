@@ -107,7 +107,8 @@ fi
 info() {
   [ "$QUIET" -eq 1 ] && return 0
   if [ "$HAS_GUM" -eq 1 ]; then
-    gum style --foreground 39 "-> $*"
+    # `gum style` parses a leading "-" in its text as a flag unless separated.
+    gum style --foreground 39 -- "-> $*"
   else
     echo -e "\033[38;5;39m->\033[0m $*"
   fi
@@ -116,7 +117,7 @@ info() {
 ok() {
   [ "$QUIET" -eq 1 ] && return 0
   if [ "$HAS_GUM" -eq 1 ]; then
-    gum style --foreground 42 "✔ $*"
+    gum style --foreground 42 -- "✔ $*"
   else
     echo -e "\033[38;5;42m✔\033[0m $*"
   fi
@@ -124,7 +125,7 @@ ok() {
 
 warn() {
   if [ "$HAS_GUM" -eq 1 ]; then
-    gum style --foreground 214 "⚠️  $*"
+    gum style --foreground 214 -- "⚠️  $*"
   else
     echo -e "\033[38;5;214m⚠️  $*\033[0m"
   fi
@@ -132,7 +133,7 @@ warn() {
 
 err() {
   if [ "$HAS_GUM" -eq 1 ]; then
-    gum style --foreground 196 "✗ $*" >&2
+    gum style --foreground 196 -- "✗ $*" >&2
   else
     echo -e "\033[38;5;196m✗ $*\033[0m" >&2
   fi
@@ -140,6 +141,13 @@ err() {
 
 run_with_spinner() {
   local title="$1"; shift
+  # Gum executes an external command, so Bash functions are not available to it.
+  # Run them in this shell; otherwise Gum would fail with "executable file not found".
+  if declare -F "$1" >/dev/null; then
+    info "$title"
+    "$@"
+    return
+  fi
   if [ "$HAS_GUM" -eq 1 ] && [ "$QUIET" -eq 0 ]; then
     gum spin --spinner dot --title "$title" -- "$@"
   else
@@ -206,6 +214,7 @@ if [ "$QUIET" -eq 0 ]; then
       --border-foreground 39 \
       --padding "0 1" \
       --margin "1 0" \
+      -- \
       "$(gum style --foreground 42 --bold 'UCA & UCAS INSTALLER')" \
       "$(gum style --foreground 245 'Universal Coding Agent Harness Auto-Updater & Version Tracker')" \
       "$(gum style --foreground 245 'Target: ') $(gum style --bold --foreground 252 "$BINARY_PATH")"

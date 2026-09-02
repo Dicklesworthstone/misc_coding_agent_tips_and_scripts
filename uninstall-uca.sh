@@ -54,15 +54,26 @@ for arg in "$@"; do
   esac
 done
 
+# Gum detection: feature-detect a working `gum style` on stdin, not just a binary.
 HAS_GUM=0
 if command -v gum &>/dev/null && [ -t 1 ] && [ "$NO_GUM" -eq 0 ]; then
-  HAS_GUM=1
+  if printf 'probe\n' | gum style >/dev/null 2>&1; then
+    HAS_GUM=1
+  fi
 fi
+
+# Style one line of text with gum, feeding it on STDIN: gum (0.x and 2.x alike)
+# treats a positional starting with "-" as a flag, so `gum style "-> msg"`
+# fails with "unknown flag ->". Remaining arguments are gum style flags.
+gum_text() {
+  local text="$1"; shift
+  printf '%s\n' "$text" | gum style "$@"
+}
 
 info() {
   [ "$QUIET" -eq 1 ] && return 0
   if [ "$HAS_GUM" -eq 1 ]; then
-    gum style --foreground 39 "-> $*"
+    gum_text "-> $*" --foreground 39
   else
     echo -e "\033[38;5;39m->\033[0m $*"
   fi
@@ -71,7 +82,7 @@ info() {
 ok() {
   [ "$QUIET" -eq 1 ] && return 0
   if [ "$HAS_GUM" -eq 1 ]; then
-    gum style --foreground 42 "✔ $*"
+    gum_text "✔ $*" --foreground 42
   else
     echo -e "\033[38;5;42m✔\033[0m $*"
   fi
@@ -79,7 +90,7 @@ ok() {
 
 warn() {
   if [ "$HAS_GUM" -eq 1 ]; then
-    gum style --foreground 214 "⚠️  $*"
+    gum_text "⚠️  $*" --foreground 214
   else
     echo -e "\033[38;5;214m⚠️  $*\033[0m"
   fi

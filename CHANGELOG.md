@@ -20,6 +20,14 @@ A tool for managing updates and version telemetry across five AI coding agent ha
 - Add `uninstall-uca.sh` (dedicated standalone uninstaller with Gum confirmation and service teardown)
 - Add `UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md` (comprehensive documentation guide)
 
+**Fixes** (2026-09-02):
+- `install-uca.sh` / `uninstall-uca.sh` aborted in any interactive terminal that had gum installed
+  (`gum: error: unknown flag ->`, then `exec: "install_uca_script": executable file not found`).
+  Message text is now fed to `gum style` on stdin so a leading `-` can never parse as a flag,
+  shell-function steps run in the current shell instead of being handed to `gum spin`, and gum is
+  feature-probed before use. Behaviour is identical on gum 0.17 and gum 2.0. Regression test:
+  `tests/test-uca-gum.sh` (#9)
+
 ---
 
 ## Local LLM Serving

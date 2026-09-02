@@ -97,17 +97,30 @@ elif [ -n "${HTTP_PROXY:-}" ]; then
   PROXY_ARGS=(--proxy "$HTTP_PROXY")
 fi
 
-# Gum detection
+# Gum detection. Feature-detect rather than trust `command -v`: a gum that
+# cannot style a line fed on stdin (wrong binary, broken install, no tty) would
+# otherwise take every message path down with it.
 HAS_GUM=0
 if command -v gum &>/dev/null && [ -t 1 ] && [ "$NO_GUM" -eq 0 ]; then
-  HAS_GUM=1
+  if printf 'probe\n' | gum style >/dev/null 2>&1; then
+    HAS_GUM=1
+  fi
 fi
+
+# Style one line of text with gum. The text is fed on STDIN, never as an
+# argument: gum's parser (both 0.x and 2.x) treats any positional that starts
+# with "-" as a flag, so `gum style "-> message"` dies with "unknown flag ->".
+# Remaining arguments are gum style flags.
+gum_text() {
+  local text="$1"; shift
+  printf '%s\n' "$text" | gum style "$@"
+}
 
 # Logging functions (Gum + ANSI fallback)
 info() {
   [ "$QUIET" -eq 1 ] && return 0
   if [ "$HAS_GUM" -eq 1 ]; then
-    gum style --foreground 39 "-> $*"
+    gum_text "-> $*" --foreground 39
   else
     echo -e "\033[38;5;39m->\033[0m $*"
   fi
@@ -116,7 +129,7 @@ info() {
 ok() {
   [ "$QUIET" -eq 1 ] && return 0
   if [ "$HAS_GUM" -eq 1 ]; then
-    gum style --foreground 42 "✔ $*"
+    gum_text "✔ $*" --foreground 42
   else
     echo -e "\033[38;5;42m✔\033[0m $*"
   fi
@@ -124,7 +137,7 @@ ok() {
 
 warn() {
   if [ "$HAS_GUM" -eq 1 ]; then
-    gum style --foreground 214 "⚠️  $*"
+    gum_text "⚠️  $*" --foreground 214
   else
     echo -e "\033[38;5;214m⚠️  $*\033[0m"
   fi
@@ -132,15 +145,22 @@ warn() {
 
 err() {
   if [ "$HAS_GUM" -eq 1 ]; then
-    gum style --foreground 196 "✗ $*" >&2
+    gum_text "✗ $*" --foreground 196 >&2
   else
     echo -e "\033[38;5;196m✗ $*\033[0m" >&2
   fi
 }
 
+# run_with_spinner TITLE COMMAND [ARGS...]
+# `gum spin` exec()s COMMAND as an external program, so a shell function can
+# only ever fail with "executable file not found in $PATH". Functions (and
+# builtins) therefore run in this shell, where they also keep access to our
+# globals, helpers and `exit`; only real executables get the spinner.
 run_with_spinner() {
   local title="$1"; shift
-  if [ "$HAS_GUM" -eq 1 ] && [ "$QUIET" -eq 0 ]; then
+  local kind
+  kind="$(type -t "$1" 2>/dev/null || true)"
+  if [ "$HAS_GUM" -eq 1 ] && [ "$QUIET" -eq 0 ] && [ "$kind" = "file" ]; then
     gum spin --spinner dot --title "$title" -- "$@"
   else
     info "$title"
@@ -201,14 +221,16 @@ SYMLINK_PATH="${DEST_DIR}/ucas"
 # Branded Header Banner
 if [ "$QUIET" -eq 0 ]; then
   if [ "$HAS_GUM" -eq 1 ]; then
+    # "--" ends flag parsing so no banner line can ever be read as a flag.
     gum style \
       --border rounded \
       --border-foreground 39 \
       --padding "0 1" \
       --margin "1 0" \
-      "$(gum style --foreground 42 --bold 'UCA & UCAS INSTALLER')" \
-      "$(gum style --foreground 245 'Universal Coding Agent Harness Auto-Updater & Version Tracker')" \
-      "$(gum style --foreground 245 'Target: ') $(gum style --bold --foreground 252 "$BINARY_PATH")"
+      -- \
+      "$(gum_text 'UCA & UCAS INSTALLER' --foreground 42 --bold)" \
+      "$(gum_text 'Universal Coding Agent Harness Auto-Updater & Version Tracker' --foreground 245)" \
+      "$(gum_text 'Target: ' --foreground 245) $(gum_text "$BINARY_PATH" --bold --foreground 252)"
   else
     banner_lines=(
       "\033[1;38;5;42mUCA & UCAS INSTALLER\033[0m"
@@ -516,25 +538,25 @@ if [ "$QUIET" -eq 0 ]; then
 
   if [ "$HAS_GUM" -eq 1 ]; then
     {
-      gum style --foreground 42 --bold "UCA & UCAS are now active!"
+      gum_text "UCA & UCAS are now active!" --foreground 42 --bold
       echo ""
-      gum style --foreground 252 --bold "Harness Status:"
-      gum style --foreground 245 "  • Claude Code:          ${CLAUDE_VER}"
-      gum style --foreground 245 "  • OpenAI Codex:         ${CODEX_VER}"
-      gum style --foreground 245 "  • Google Antigravity:   ${AGY_VER}"
-      gum style --foreground 245 "  • xAI Grok:             ${GROK_VER}"
-      gum style --foreground 245 "  • OMP:                  ${OMP_VER}"
+      gum_text "Harness Status:" --foreground 252 --bold
+      gum_text "  • Claude Code:          ${CLAUDE_VER}" --foreground 245
+      gum_text "  • OpenAI Codex:         ${CODEX_VER}" --foreground 245
+      gum_text "  • Google Antigravity:   ${AGY_VER}" --foreground 245
+      gum_text "  • xAI Grok:             ${GROK_VER}" --foreground 245
+      gum_text "  • OMP:                  ${OMP_VER}" --foreground 245
       echo ""
-      echo "$(gum style --foreground 252 --bold 'Background Schedule:') $(gum style --foreground 42 --bold 'Active (every 3 hours)')"
-      echo "$(gum style --foreground 252 --bold 'State Directory:')     $(gum style --foreground 245 "$STATE_DIR")"
+      echo "$(gum_text 'Background Schedule:' --foreground 252 --bold) $(gum_text 'Active (every 3 hours)' --foreground 42 --bold)"
+      echo "$(gum_text 'State Directory:' --foreground 252 --bold)     $(gum_text "$STATE_DIR" --foreground 245)"
       echo ""
-      gum style --foreground 39 --bold "Quick Commands:"
-      echo "  $(gum style --bold --foreground 252 'uca')         Update all 5 harnesses sequentially"
-      echo "  $(gum style --bold --foreground 252 'ucas')        Open status dashboard with version transitions"
-      echo "  $(gum style --bold --foreground 252 'uca omp')     Update only OMP (or claude, codex, agy, grok)"
-      echo "  $(gum style --bold --foreground 252 'uca doctor')  Run environment & harness diagnostics"
+      gum_text "Quick Commands:" --foreground 39 --bold
+      echo "  $(gum_text 'uca' --bold --foreground 252)         Update all 5 harnesses sequentially"
+      echo "  $(gum_text 'ucas' --bold --foreground 252)        Open status dashboard with version transitions"
+      echo "  $(gum_text 'uca omp' --bold --foreground 252)     Update only OMP (or claude, codex, agy, grok)"
+      echo "  $(gum_text 'uca doctor' --bold --foreground 252)  Run environment & harness diagnostics"
       echo ""
-      gum style --foreground 245 --italic "To uninstall: ./install-uca.sh --uninstall"
+      gum_text "To uninstall: ./install-uca.sh --uninstall" --foreground 245 --italic
     } | gum style --border rounded --border-foreground 42 --padding "1 2" --margin "1 0"
   else
     draw_box 42 "${summary_lines[@]}"

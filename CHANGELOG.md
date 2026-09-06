@@ -20,6 +20,12 @@ A tool for managing updates and version telemetry across five AI coding agent ha
 - Add `uninstall-uca.sh` (dedicated standalone uninstaller with Gum confirmation and service teardown)
 - Add `UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md` (comprehensive documentation guide)
 
+**Fixes** (2026-09-06):
+- npm-owned Codex updates now pass `--prefer-online --min-release-age=0` so
+  npm 11 does not skip a just-published `@latest` (or serve a stale packument)
+  and install an older version. A 7-day `min-release-age` in `~/.npmrc`
+  previously downgraded Codex 0.153.2 to 0.151.0.
+
 **Fixes** (2026-09-02):
 - `install-uca.sh` / `uninstall-uca.sh` aborted in any interactive terminal that had gum installed
   (`gum: error: unknown flag ->`, then `exec: "install_uca_script": executable file not found`).

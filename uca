@@ -346,7 +346,9 @@ update_codex() {
     bun)
       bun install -g @openai/codex@latest 2>&1 || ret=$? ;;
     npm)
-      npm install -g @openai/codex@latest 2>&1 || ret=$? ;;
+      # npm 11 honors min-release-age (often 7d via npmrc) and a stale
+      # packument cache, which can install an older dist-tag than @latest.
+      npm install -g @openai/codex@latest --prefer-online --min-release-age=0 2>&1 || ret=$? ;;
     standalone|*)
       # Standalone installer (or unknown ownership): use codex's own
       # updater rather than guessing a package manager.

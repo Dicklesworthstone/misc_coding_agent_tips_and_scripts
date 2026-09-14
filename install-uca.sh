@@ -452,12 +452,24 @@ configure_shell_integration() {
     return 0
   fi
 
-  # Clean old alias uca= from zshrc.local if present
+  # ~/.zshrc.local is sourced LAST by ACFS (~/.acfs/zsh/acfs.zshrc). The
+  # managed ACFS file still ships `alias uca='acfs update --agents-only --force'`,
+  # which shadows ~/.local/bin/uca. Keep an unalias here so ACFS cannot steal
+  # the name back. Also strip any leftover `alias uca=` pipeline from older
+  # zshrc.local copies.
   if [ -f "$zshrc_local" ] && [ -w "$zshrc_local" ]; then
     if grep -q "alias uca=" "$zshrc_local" 2>/dev/null; then
       sed -i.bak '/alias uca=/d' "$zshrc_local" 2>/dev/null || true
       rm -f "${zshrc_local}.bak" 2>/dev/null || true
     fi
+  fi
+  if [ ! -f "$zshrc_local" ] || ! grep -q "unalias uca" "$zshrc_local" 2>/dev/null; then
+    {
+      echo ""
+      echo "# UCA owns \`uca\`; do not let ACFS or legacy pipeline aliases shadow it."
+      echo "unalias uca 2>/dev/null || true"
+      echo "alias ucas='command uca status'"
+    } >> "$zshrc_local"
   fi
 
   # Clean old alias uca= from bash_aliases if present
@@ -478,7 +490,7 @@ configure_shell_integration() {
       echo "unalias uca 2>/dev/null || true" >> "$zshrc"
     fi
     if ! grep -q "alias ucas=" "$zshrc" 2>/dev/null; then
-      echo "alias ucas='uca status'" >> "$zshrc"
+      echo "alias ucas='command uca status'" >> "$zshrc"
     fi
   fi
 
@@ -492,17 +504,17 @@ configure_shell_integration() {
       echo "unalias uca 2>/dev/null || true" >> "$bashrc"
     fi
     if ! grep -q "alias ucas=" "$bashrc" 2>/dev/null; then
-      echo "alias ucas='uca status'" >> "$bashrc"
+      echo "alias ucas='command uca status'" >> "$bashrc"
     fi
   fi
 
   # Add alias to fish config if present
   if [ -f "$fishrc" ] && [ -w "$fishrc" ]; then
     if ! grep -q "alias ucas=" "$fishrc" 2>/dev/null; then
-      echo "alias ucas='uca status'" >> "$fishrc"
+      echo "alias ucas='command uca status'" >> "$fishrc"
     fi
   fi
-  ok "Configured shell integration (unaliased uca, set alias ucas='uca status')"
+  ok "Configured shell integration (unaliased uca, set alias ucas='command uca status')"
 }
 configure_shell_integration
 

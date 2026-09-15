@@ -23,6 +23,7 @@
 #   • Google Antigravity (agy update)
 #   • xAI Grok           (grok update)
 #   • OMP                (omp update)
+#   • Cursor Agent       (cursor-agent update)
 #
 # Usage:
 #   uca                  Update all agent harnesses sequentially
@@ -260,6 +261,11 @@ get_harness_version() {
         raw=$(omp --version 2>/dev/null || "$HOME/.bun/bin/omp" --version 2>/dev/null || true)
       fi
       ;;
+    cursor)
+      local cbin
+      cbin=$(resolve_cursor_binary)
+      [ -n "$cbin" ] && raw=$("$cbin" --version 2>/dev/null || true)
+      ;;
   esac
 
   if [ -n "$raw" ]; then
@@ -283,6 +289,10 @@ smoke_test_harness() {
       (grok --help &>/dev/null || "$HOME/.grok/bin/grok" --help &>/dev/null) && return 0 ;;
     omp)
       (omp --help &>/dev/null || "$HOME/.bun/bin/omp" --help &>/dev/null) && return 0 ;;
+    cursor)
+      local cbin
+      cbin=$(resolve_cursor_binary)
+      [ -n "$cbin" ] && "$cbin" --help &>/dev/null && return 0 ;;
   esac
   return 1
 }
@@ -442,6 +452,39 @@ update_codex() {
   return 0
 }
 
+# Cursor Agent CLI
+# The installer (curl https://cursor.com/install -fsS | bash) links both
+# ~/.local/bin/cursor-agent and ~/.local/bin/agent at
+# ~/.local/share/cursor-agent/versions/<ver>/cursor-agent. Prefer the
+# unambiguous name; accept a bare `agent` only when it resolves into the
+# cursor-agent tree, since `agent` is a generic name other tools may claim.
+resolve_cursor_binary() {
+  local p
+  for p in "$(command -v cursor-agent 2>/dev/null || true)" "$HOME/.local/bin/cursor-agent" \
+           "$(command -v agent 2>/dev/null || true)" "$HOME/.local/bin/agent"; do
+    [ -n "$p" ] && [ -x "$p" ] || continue
+    case "$p" in
+      */cursor-agent) echo "$p"; return 0 ;;
+    esac
+    case "$(resolve_real_path "$p")" in
+      */cursor-agent/*|*/cursor-agent) echo "$p"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# harness_version_lt KEY A B — version_lt with per-harness version grammar.
+# Cursor versions are <date>-<git hash> (2026.09.10-fd3934a); the hash is a
+# build id, not a pre-release tag, so two same-day builds are unordered and
+# only the date decides whether a change was a downgrade.
+harness_version_lt() {
+  local key="$1" a="$2" b="$3"
+  case "$key" in
+    cursor) a="${a%%-*}"; b="${b%%-*}" ;;
+  esac
+  version_lt "$a" "$b"
+}
+
 # Update Harness Command Executor
 update_harness() {
   local key="$1"
@@ -456,6 +499,10 @@ update_harness() {
       if command -v grok &>/dev/null; then grok update 2>&1; else "$HOME/.grok/bin/grok" update 2>&1; fi ;;
     omp)
       if command -v omp &>/dev/null; then omp update 2>&1; else "$HOME/.bun/bin/omp" update 2>&1; fi ;;
+    cursor)
+      local cbin
+      cbin=$(resolve_cursor_binary) || return 1
+      "$cbin" update 2>&1 ;;
   esac
 }
 
@@ -555,6 +602,14 @@ write_state() {
       "previous_version": "${PV_OMP:-${V_OMP:-}}",
       "last_status": "${ST_OMP:-up_to_date}",
       "last_checked_at": "$last_run_iso"
+    },
+    "cursor": {
+      "name": "Cursor Agent",
+      "installed": $( [ -n "${V_CURSOR:-}" ] && echo "true" || echo "false" ),
+      "current_version": "${V_CURSOR:-}",
+      "previous_version": "${PV_CURSOR:-${V_CURSOR:-}}",
+      "last_status": "${ST_CURSOR:-up_to_date}",
+      "last_checked_at": "$last_run_iso"
     }
   }
 }
@@ -627,16 +682,17 @@ show_status_dashboard() {
   local json_mode="${1:-0}"
   
   # Parallel Fast Probing using subshells
-  V_CLAUDE="" V_CODEX="" V_AGY="" V_GROK="" V_OMP=""
-  
+  V_CLAUDE="" V_CODEX="" V_AGY="" V_GROK="" V_OMP="" V_CURSOR=""
+
   local tmp_dir="$STATE_DIR/.probe.$$"
   mkdir -p "$tmp_dir"
-  
+
   ( get_harness_version "claude" > "$tmp_dir/claude" ) &
   ( get_harness_version "codex"  > "$tmp_dir/codex" ) &
   ( get_harness_version "agy"    > "$tmp_dir/agy" ) &
   ( get_harness_version "grok"   > "$tmp_dir/grok" ) &
   ( get_harness_version "omp"    > "$tmp_dir/omp" ) &
+  ( get_harness_version "cursor" > "$tmp_dir/cursor" ) &
   wait
 
   [ -f "$tmp_dir/claude" ] && V_CLAUDE=$(cat "$tmp_dir/claude")
@@ -644,6 +700,7 @@ show_status_dashboard() {
   [ -f "$tmp_dir/agy" ]    && V_AGY=$(cat "$tmp_dir/agy")
   [ -f "$tmp_dir/grok" ]   && V_GROK=$(cat "$tmp_dir/grok")
   [ -f "$tmp_dir/omp" ]    && V_OMP=$(cat "$tmp_dir/omp")
+  [ -f "$tmp_dir/cursor" ] && V_CURSOR=$(cat "$tmp_dir/cursor")
   rm -rf "$tmp_dir" 2>/dev/null || true
 
   # Disk Space
@@ -753,16 +810,16 @@ show_status_dashboard() {
 
   # Table
   local subsep=""
-  for ((i=0; i<116; i++)); do subsep="${subsep}─"; done
+  for ((i=0; i<132; i++)); do subsep="${subsep}─"; done
 
   echo -e "\n ${C_BOLD}HARNESS BREAKDOWN${C_RESET}"
   echo -e "${C_GRAY}${subsep}${C_RESET}"
 
   local h_harness h_ver h_status h_change h_checked
   h_harness=$(pad_str "Harness" 22)
-  h_ver=$(pad_str "Version" 12)
+  h_ver=$(pad_str "Version" 20)
   h_status=$(pad_str "Status" 16)
-  h_change=$(pad_str "Version Changes" 52)
+  h_change=$(pad_str "Version Changes" 60)
   h_checked=$(pad_str "Checked" 12)
 
   echo -e " ${C_BOLD}${C_BLUE}${h_harness}${h_ver}${h_status}${h_change}${h_checked}${C_RESET}"
@@ -774,7 +831,7 @@ show_status_dashboard() {
     prev_ver=$(read_harness_prev_version_from_state "$key")
 
     if [ -z "$ver" ]; then
-      echo -e " $(pad_str "$name" 22)$(pad_str "-" 12)$(pad_str "${C_GRAY}Not Found${C_RESET}" 16)$(pad_str "${C_GRAY}Binary not installed in PATH${C_RESET}" 52)$(pad_str "-" 12)"
+      echo -e " $(pad_str "$name" 22)$(pad_str "-" 20)$(pad_str "${C_GRAY}Not Found${C_RESET}" 16)$(pad_str "${C_GRAY}Binary not installed in PATH${C_RESET}" 60)$(pad_str "-" 12)"
     else
       local v_badge="${C_BOLD}${C_WHITE}${ver}${C_RESET}"
       local s_badge="${C_GREEN}✔ Up to date${C_RESET}"
@@ -785,7 +842,7 @@ show_status_dashboard() {
         c_txt="From version ${C_YELLOW}${prev_ver}${C_RESET} to version ${C_BOLD}${C_GREEN}${ver}${C_RESET} ${C_GRAY}(${last_run_rel})${C_RESET}"
       fi
 
-      echo -e " $(pad_str "$name" 22)$(pad_str "$v_badge" 12)$(pad_str "$s_badge" 16)$(pad_str "$c_txt" 52)$(pad_str "$last_run_rel" 12)"
+      echo -e " $(pad_str "$name" 22)$(pad_str "$v_badge" 20)$(pad_str "$s_badge" 16)$(pad_str "$c_txt" 60)$(pad_str "$last_run_rel" 12)"
     fi
   }
 
@@ -794,6 +851,7 @@ show_status_dashboard() {
   render_harness_row "Google Antigravity" "agy"    "$V_AGY"
   render_harness_row "xAI Grok"          "grok"   "$V_GROK"
   render_harness_row "OMP"               "omp"    "$V_OMP"
+  render_harness_row "Cursor Agent"      "cursor" "$V_CURSOR"
 
   echo -e "${C_GRAY}${subsep}${C_RESET}\n"
 
@@ -883,7 +941,7 @@ run_all_updates() {
   fi
 
   # Harness update loop
-  local harnesses=("claude" "codex" "agy" "grok" "omp")
+  local harnesses=("claude" "codex" "agy" "grok" "omp" "cursor")
   if [ -n "$target_key" ]; then
     harnesses=("$target_key")
   fi
@@ -904,6 +962,7 @@ run_all_updates() {
   PV_AGY=$(read_harness_version_from_state "agy")
   PV_GROK=$(read_harness_version_from_state "grok")
   PV_OMP=$(read_harness_version_from_state "omp")
+  PV_CURSOR=$(read_harness_version_from_state "cursor")
 
   for h in "${harnesses[@]}"; do
     local h_name=""
@@ -913,6 +972,7 @@ run_all_updates() {
       agy)    h_name="Google Antigravity" ;;
       grok)   h_name="xAI Grok" ;;
       omp)    h_name="OMP" ;;
+      cursor) h_name="Cursor Agent" ;;
     esac
 
     local v_before
@@ -955,13 +1015,14 @@ run_all_updates() {
       agy)    V_AGY="$v_after";    ST_AGY="up_to_date" ;;
       grok)   V_GROK="$v_after";   ST_GROK="up_to_date" ;;
       omp)    V_OMP="$v_after";    ST_OMP="up_to_date" ;;
+      cursor) V_CURSOR="$v_after"; ST_CURSOR="up_to_date" ;;
     esac
 
     # A version that moved backwards is not an update: the harness's own
     # updater or its package manager handed us an older release (see
     # update_codex for the release-age-gate case). Report it as a failure,
     # never as "UPDATED", and never notify "Upgraded" for it.
-    if [ -n "$v_before" ] && [ -n "$v_after" ] && version_lt "$v_after" "$v_before"; then
+    if [ -n "$v_before" ] && [ -n "$v_after" ] && harness_version_lt "$h" "$v_after" "$v_before"; then
       has_errors=1
       case "$h" in
         claude) ST_CLAUDE="error" ;;
@@ -969,6 +1030,7 @@ run_all_updates() {
         agy)    ST_AGY="error" ;;
         grok)   ST_GROK="error" ;;
         omp)    ST_OMP="error" ;;
+        cursor) ST_CURSOR="error" ;;
       esac
       if [ "$quiet" -eq 0 ]; then
         echo -e "\r  ${C_YELLOW}⚠️${C_RESET} $(pad_str "${C_BOLD}${h_name}${C_RESET}" 20) ${C_BOLD}${C_YELLOW}DOWNGRADED${C_RESET}: From version ${C_YELLOW}${v_before}${C_RESET} to version ${C_YELLOW}${v_after}${C_RESET} (${h_dur}s)"
@@ -987,6 +1049,7 @@ run_all_updates() {
         agy)    ST_AGY="updated" ;;
         grok)   ST_GROK="updated" ;;
         omp)    ST_OMP="updated" ;;
+        cursor) ST_CURSOR="updated" ;;
       esac
 
       if [ "$quiet" -eq 0 ]; then
@@ -1005,6 +1068,7 @@ run_all_updates() {
           agy)    ST_AGY="error" ;;
           grok)   ST_GROK="error" ;;
           omp)    ST_OMP="error" ;;
+          cursor) ST_CURSOR="error" ;;
         esac
         if [ "$quiet" -eq 0 ]; then
           echo -e "\r  ${C_YELLOW}⚠️${C_RESET} $(pad_str "${C_BOLD}${h_name}${C_RESET}" 20) ${C_YELLOW}Update Warning${C_RESET} (${v_after})"
@@ -1377,7 +1441,7 @@ run_doctor_suite() {
 
   # 6. DET-HARNESS-SMOKE
   local broken_harnesses=()
-  for h in "claude" "codex" "agy" "grok" "omp"; do
+  for h in "claude" "codex" "agy" "grok" "omp" "cursor"; do
     local v
     v=$(get_harness_version "$h")
     if [ -n "$v" ] && ! smoke_test_harness "$h"; then
@@ -1408,7 +1472,7 @@ run_doctor_suite() {
   # Health-only mode
   if [ "$health_only" -eq 1 ]; then
     if [ "${#findings[@]}" -eq 0 ]; then
-      echo "OK: UCA environment is healthy (5/5 harnesses ready, background service active, ${free_gb} GB free)"
+      echo "OK: UCA environment is healthy (6/6 harnesses ready, background service active, ${free_gb} GB free)"
       return 0
     else
       echo "WARNING: ${#findings[@]} findings detected in UCA environment"
@@ -1611,7 +1675,7 @@ EOF
       local p_name p_bin p_ver
       p_name=$(pad_str "$name" 20)
       p_bin=$(pad_str "$bin_path" 38)
-      p_ver=$(pad_str "$v" 14)
+      p_ver=$(pad_str "$v" 20)
       echo -e "    ${C_GREEN}✔${C_RESET} ${p_name} ${C_GRAY}${p_bin}${C_RESET} Version: ${C_BOLD}${p_ver}${C_RESET} Smoke: $smoke_st"
     else
       echo -e "    ${C_GRAY}•${C_RESET} $(pad_str "$name" 20) ${C_GRAY}Binary not installed${C_RESET}"
@@ -1623,6 +1687,7 @@ EOF
   check_harness_doc "Google Antigravity"  "agy"    "agy"
   check_harness_doc "xAI Grok"           "grok"   "grok"
   check_harness_doc "OMP"                "omp"    "omp"
+  check_harness_doc "Cursor Agent"       "cursor" "cursor-agent"
 
   if [ "${#findings[@]}" -gt 0 ]; then
     echo -e "\n  ${C_YELLOW}⚠️  ${#findings[@]} issues detected. Run '${C_BOLD}uca doctor --fix${C_RESET}' to auto-remediate.${C_RESET}"
@@ -1908,7 +1973,7 @@ main() {
         echo "UCA — Universal Coding Agent Harness Updater & Version Tracker"
         echo ""
         echo "Usage:"
-        echo "  uca                 Update all agent harnesses (claude, codex, agy, grok, omp)"
+        echo "  uca                 Update all agent harnesses (claude, codex, agy, grok, omp, cursor)"
         echo "  ucas                Show status breakdown, version changes, and schedule"
         echo "  ucas -w, --watch    Interactive live auto-refreshing dashboard"
         echo "  uca <harness>       Update specific harness (e.g. 'uca omp', 'uca claude')"
@@ -1949,7 +2014,7 @@ main() {
       --ignore-disk-space) ign_disk=1 ;;
       --min-disk-mb=*)     min_d="${1#*=}" ;;
       --min-disk-mb)       shift; min_d="$1" ;;
-      claude|codex|agy|grok|omp) target="$1" ;;
+      claude|codex|agy|grok|omp|cursor) target="$1" ;;
       all) target="" ;;
     esac
     shift 2>/dev/null || break

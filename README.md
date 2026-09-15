@@ -520,7 +520,7 @@ Many high-end workstations (Threadripper PRO, EPYC) have **unused 10GbE ports**.
 <a id="universal-coding-agent-harness-updater"></a>
 <a id="universal-coding-agent-uca-harness-updater"></a>
 
-A standalone tool for updating, tracking versions, and scheduling background maintenance across five AI coding agent harnesses: **Claude Code**, **OpenAI Codex**, **Google Antigravity (AGY)**, **xAI Grok**, and **OMP**.
+A standalone tool for updating, tracking versions, and scheduling background maintenance across six AI coding agent harnesses: **Claude Code**, **OpenAI Codex**, **Google Antigravity (AGY)**, **xAI Grok**, **OMP**, and **Cursor Agent**.
 
 Runs as a zero-dependency Bash script with background 3-hour scheduling (launchd on macOS, systemd on Linux), live version transition tracking, low disk space safety checks, and self-healing diagnostics (`uca doctor`).
 
@@ -533,7 +533,7 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agen
 **Common Commands:**
 
 ```bash
-uca                  # Update all 5 harnesses sequentially
+uca                  # Update all 6 harnesses sequentially
 ucas                 # View status dashboard and version history
 ucas -w              # Live auto-refreshing dashboard HUD
 uca <harness>        # Update a single harness (e.g. uca omp, uca claude)

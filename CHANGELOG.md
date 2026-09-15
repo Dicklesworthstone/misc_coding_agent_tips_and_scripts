@@ -10,7 +10,7 @@ This project has no formal versioning or GitHub Releases. There are no tags. Cha
 
 ### Universal Coding Agent (UCA) Harness Updater and Status Dashboard (UCAS)
 
-A tool for managing updates and version telemetry across five AI coding agent harnesses: **Claude Code**, **OpenAI Codex**, **Google Antigravity**, **xAI Grok**, and **OMP**. Includes automatic 3-hour background scheduling (systemd user timers on Linux and launchd on macOS), terminal dashboard visualization with ANSI fallback, live version change tracking (`"From version xyz to version abc"`), atomic locking with stale PID recovery, and health diagnostics (`uca doctor`).
+A tool for managing updates and version telemetry across six AI coding agent harnesses: **Claude Code**, **OpenAI Codex**, **Google Antigravity**, **xAI Grok**, **OMP**, and **Cursor Agent**. Includes automatic 3-hour background scheduling (systemd user timers on Linux and launchd on macOS), terminal dashboard visualization with ANSI fallback, live version change tracking (`"From version xyz to version abc"`), atomic locking with stale PID recovery, and health diagnostics (`uca doctor`).
 
 **Initial release & feature expansion** (2026-08-29):
 - Add `uca` (zero-dependency pure-Bash updater, version telemetry engine, interactive watch mode, smoke test guard, notifications, log viewer, and in-binary uninstaller)
@@ -19,6 +19,16 @@ A tool for managing updates and version telemetry across five AI coding agent ha
 - Add `install-uca.sh` (workmanship-compliant installer with preflight, atomic lock, and diagnostics)
 - Add `uninstall-uca.sh` (dedicated standalone uninstaller with Gum confirmation and service teardown)
 - Add `UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md` (comprehensive documentation guide)
+
+**Cursor Agent support** (2026-09-15):
+- Add the Cursor Agent CLI as a sixth harness (`uca cursor`). The binary is resolved as
+  `cursor-agent` first; a bare `agent` counts only when it resolves into
+  `~/.local/share/cursor-agent/`, so an unrelated `agent` command is never probed or updated.
+  Updates run `cursor-agent update`; the dashboard, state file, doctor smoke test, and installer
+  summary all gain a row.
+- Cursor versions are `<date>-<git hash>` (`2026.09.10-fd3934a`), so the downgrade guard compares
+  only the date for this harness: a same-day rebuild is reported as `UPDATED`, an older date as
+  `DOWNGRADED`. Regression test: `tests/test-uca-cursor.sh`
 
 **Fixes** (2026-09-06):
 - `uca codex` could downgrade an npm- or bun-owned install and then report it as an update

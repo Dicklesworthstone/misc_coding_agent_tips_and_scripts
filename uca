@@ -1794,6 +1794,14 @@ run_uninstaller() {
 main() {
   local prog_name
   prog_name=$(basename "$0")
+
+  # Probe and update from $HOME, never the caller's directory. Some harnesses
+  # refuse to start when the cwd is unusable: claude prints "The current working
+  # directory was deleted…" and exits, and a macOS privacy (TCC) denial on
+  # ~/Downloads does the same. The probes discard stderr, so that silently
+  # reported an installed harness as "Not installed (skipped)" and never
+  # updated it. Nothing in uca depends on the caller's cwd.
+  cd "$HOME" 2>/dev/null || cd / || true
   
   # Invocation as ucas or uca status
   if [ "$prog_name" = "ucas" ] || { [ $# -gt 0 ] && [[ "$1" =~ ^(status|s|st|-s|--status)$ ]]; }; then

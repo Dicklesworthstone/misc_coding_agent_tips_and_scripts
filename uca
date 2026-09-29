@@ -358,6 +358,35 @@ version_lt() {
   return 1
 }
 
+# Print a warning when the copy of a harness that PATH runs is OLDER than
+# another copy of it on PATH. Self-updaters install to their own location
+# (e.g. `omp update` → ~/.local/bin/omp), so an earlier-PATH stale copy (e.g. a
+# leftover ~/.bun/bin/omp) keeps running the old version, and uca's own
+# post-update probe reads it as a downgrade. Prints nothing when fine.
+shadowed_install_warning() {
+  local cmd="$1" active active_real active_v p real v best_v="" best_path=""
+  active=$(command -v "$cmd" 2>/dev/null) || return 0
+  active_real=$(resolve_real_path "$active")
+  active_v=$(extract_clean_version "$("$active" --version 2>/dev/null || true)")
+  [ -n "$active_v" ] || return 0
+  local seen=" $active_real "
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    real=$(resolve_real_path "$p")
+    case "$seen" in *" $real "*) continue ;; esac
+    seen="$seen$real "
+    v=$(extract_clean_version "$("$p" --version 2>/dev/null || true)")
+    [ -n "$v" ] || continue
+    if version_lt "$active_v" "$v" && { [ -z "$best_v" ] || version_lt "$best_v" "$v"; }; then
+      best_v="$v"; best_path="$p"
+    fi
+  done < <(type -ap "$cmd" 2>/dev/null)
+  if [ -n "$best_v" ]; then
+    echo "'$cmd' on PATH runs $active ($active_v), but $best_path is newer ($best_v) — updates are likely landing in a shadowed copy; remove or relink the stale one."
+  fi
+  return 0
+}
+
 # The registry's current `latest` dist-tag for @openai/codex, read through the
 # package manager that owns the install (so a custom registry in npmrc/bunfig
 # is honoured). Neither `npm view` nor `bun info` is subject to release-age
@@ -1016,6 +1045,12 @@ run_all_updates() {
     # update_harness output itself is discarded.
     if [ "$h" = "codex" ] && [ -n "$CODEX_UPDATE_WARNING" ] && [ "$quiet" -eq 0 ]; then
       echo -e "     ${C_YELLOW}⚠ ${CODEX_UPDATE_WARNING}${C_RESET}"
+    fi
+    # Any harness: the copy PATH runs is older than another copy on PATH.
+    if [ "$quiet" -eq 0 ]; then
+      local shadow_msg
+      shadow_msg=$(shadowed_install_warning "$h")
+      [ -n "$shadow_msg" ] && echo -e "     ${C_YELLOW}⚠ ${shadow_msg}${C_RESET}"
     fi
   done
 

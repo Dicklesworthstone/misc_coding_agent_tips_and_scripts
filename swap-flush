@@ -174,21 +174,43 @@ fi
 log_info "flushing: state=[$state]"
 start_ts="$(date +%s)"
 
-# swapoff -a can be very slow on big swap files. Use --verbose so the
-# journal captures per-device timing.
+# Drain DISK swap devices only, one at a time. Never `swapoff -a`: that
+# also disables zram, which decompresses every zram page back into RAM
+# (up to the full zram size) for no latency win — on hosts whose zram is
+# full, that swapoff sits in D state for many minutes while memory
+# pressure spikes. Each device is re-enabled at its original priority
+# (`swapon -a` would skip swap that isn't in fstab and reset priorities).
 #
-# Note: `swapoff -a` returns nonzero if any single device fails to
-# disable (e.g., zram is briefly busy with active writes) even when the
-# DISK swap was drained successfully. We trust the before/after
-# disk_swap_used delta below as the real success signal, and don't
-# escalate that nonzero exit to a warning unless the data shows the
-# flush actually didn't take.
-swapoff -av 2>&1 | logger -t swap-flush -p user.info || true
-swapon -av 2>&1 | logger -t swap-flush -p user.info || true
+# swapoff can be very slow on big swap files; --verbose gives per-device
+# timing in the journal. A device may fail to disable (e.g., not enough
+# RAM to absorb it); we trust the before/after disk_swap_used delta below
+# as the real success signal rather than escalating a nonzero exit.
+list_disk_swap_devices() {
+    local name prio
+    swapon --show=NAME,PRIO --noheadings 2>/dev/null | while read -r name prio; do
+        case "$name" in
+            ''|/dev/zram*) continue ;;
+        esac
+        printf '%s %s\n' "$name" "${prio:--1}"
+    done
+}
 
-# Some setups have a separate zram-swap service that needs a kick because
-# `swapoff -a` removed its swap and the kernel won't reattach it on its
-# own. Restart it if it exists and there's no zram swap currently active.
+disk_swap_devices="$(list_disk_swap_devices)"
+while read -r dev prio; do
+    [ -z "$dev" ] && continue
+    swapoff -v "$dev" 2>&1 | logger -t swap-flush -p user.info || true
+    # swapon -p only accepts -1..32767; kernel-assigned priorities are
+    # -2, -3, ... and can only be restored by letting the kernel assign.
+    if [ "$prio" -ge -1 ] 2>/dev/null; then
+        swapon -v -p "$prio" "$dev" 2>&1 | logger -t swap-flush -p user.info || true
+    else
+        swapon -v "$dev" 2>&1 | logger -t swap-flush -p user.info || true
+    fi
+done <<< "$disk_swap_devices"
+
+# Some setups have a separate zram-swap service that needs a kick if its
+# swap went missing (e.g., an older version of this script ran
+# `swapoff -a`). Restart it if it exists and there's no zram swap active.
 #
 # Note: `systemctl list-unit-files <name>` returns 0 with empty output
 # for nonexistent units — useless as an existence check. `systemctl cat`

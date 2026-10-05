@@ -891,12 +891,12 @@ This tool is the safe automatic version. A systemd timer fires every 30 minutes 
 | `MAX_MEM_PRESSURE` | 5.0 % PSI avg10 | Piling work onto a memory-stressed host |
 | `MAX_LOAD_RATIO` | 1.0× nproc | Piling work onto a CPU-stressed host |
 
-If **all four** hold, the script runs `swapoff -av && swapon -av` and logs the before/after numbers. Otherwise it logs a skip reason and exits cleanly. Either way, exit code 0 — so `systemctl status swap-flush.service` only goes red on real malfunctions, never on a deliberate skip.
+If **all four** hold, the script drains each **disk** swap device in turn (`swapoff -v <dev>`, then `swapon` at its original priority) and logs the before/after numbers. zram is never swapped off — that would only decompress it back into RAM. Otherwise it logs a skip reason and exits cleanly. Either way, exit code 0 — so `systemctl status swap-flush.service` only goes red on real malfunctions, never on a deliberate skip.
 
 A few smaller design decisions worth highlighting:
 
 - **zram swap doesn't count.** zram is RAM-backed compressed pages, not on disk. There's no random-read latency to restore by flushing it. If your host uses both zram + disk swap, only the disk portion is what we want to drain.
-- **`MEM_SAFETY_FACTOR` is the OOM gate.** With the default 1.5×, on a system with 30 GB of disk swap used, the script requires 45 GB of available RAM before it tries `swapoff -a`. That's the headroom needed for the kernel to migrate pages back without crashing into normal allocations.
+- **`MEM_SAFETY_FACTOR` is the OOM gate.** With the default 1.5×, on a system with 30 GB of disk swap used, the script requires 45 GB of available RAM before it starts swapping off the disk devices. That's the headroom needed for the kernel to migrate pages back without crashing into normal allocations.
 - **Numeric env vars are validated at startup.** A typo like `MEM_SAFETY_FACTOR="1,5"` (comma instead of period) would otherwise make awk silently parse it as 0, defeating the safety check and proceeding with zero headroom. A regex catches this and aborts before any swap manipulation.
 - **5-minute random jitter** prevents fleet-wide hosts from all flushing at exactly `:00` and `:30`. A 13-machine swarm doesn't need 13 simultaneous swapoff storms.
 - **`Type=oneshot`** ensures only one instance runs at a time; the next timer fire waits if the current run is still draining.

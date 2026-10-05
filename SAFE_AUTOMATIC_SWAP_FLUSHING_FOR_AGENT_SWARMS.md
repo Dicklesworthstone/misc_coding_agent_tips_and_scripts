@@ -69,8 +69,8 @@ If all four hold, swapoff/swapon runs. Otherwise it logs a skip reason to journa
 ┃        all yes? ────► no ────► log "skip: <reason>" → exit 0                 ┃
 ┃           │                                                                  ┃
 ┃           ▼                                                                  ┃
-┃     swapoff -av                                  bulk-migrate pages to RAM   ┃
-┃     swapon  -av                                  re-enable swap fresh        ┃
+┃     swapoff -v <each disk dev>  (never zram)     bulk-migrate pages to RAM   ┃
+┃     swapon  -v [-p prio] <dev>                   re-enable at same priority  ┃
 ┃     restart zram-swap.service if present                                     ┃
 ┃           │                                                                  ┃
 ┃           ▼                                                                  ┃
@@ -156,7 +156,7 @@ sudo env DRY_RUN=1 MEM_SAFETY_FACTOR=3.0 /usr/local/bin/swap-flush
 
 ## What it logs
 
-All decisions go to journald under tag `swap-flush`. Each invocation produces exactly one summary line, plus the per-device output of `swapoff -av` / `swapon -av` if the flush ran.
+All decisions go to journald under tag `swap-flush`. Each invocation produces exactly one summary line, plus the per-device output of `swapoff -v` / `swapon -v` for each disk swap device if the flush ran.
 
 ### Skip — not enough swap
 
@@ -253,7 +253,7 @@ Tracking what previous invocations did and adjusting thresholds is a reasonable 
 
 ### "Run swapoff per-device with timeout, fall back to per-page if slow"
 
-`swapoff -a` is already pretty smart about ordering and parallelism. Reimplementing it in bash would add complexity without obvious benefit. The 30-minute `TimeoutStartSec` is the safety net if swapoff genuinely hangs.
+The script does run `swapoff` per device — but only so it can skip zram (an earlier version ran `swapoff -a`, which also disabled zram and decompressed all of it back into RAM, pinning a full-zram host in D state for minutes every 30 minutes). A per-device timeout or per-page fallback would add complexity without obvious benefit; the 30-minute `TimeoutStartSec` is the safety net if swapoff genuinely hangs.
 
 ---
 
@@ -281,7 +281,7 @@ sudo systemctl daemon-reload
 
 Common on busy hosts. The flush DID drain swap, but the kernel was actively pushing pages back out as we re-enabled swap, so net change is near zero. The flush wasn't wasted — pages were rotated through RAM during the operation, which is exactly the desired effect.
 
-If you want to see how much was reclaimed mid-flight, the per-device `swapoff -av` output in journald shows the actual bytes drained per device.
+If you want to see how much was reclaimed mid-flight, the per-device `swapoff -v` output in journald shows the actual bytes drained per device.
 
 ### "It tripped the safety check and skipped, but I really want it to flush"
 

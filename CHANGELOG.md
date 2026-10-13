@@ -20,6 +20,14 @@ A tool for managing updates and version telemetry across five AI coding agent ha
 - Add `uninstall-uca.sh` (dedicated standalone uninstaller with Gum confirmation and service teardown)
 - Add `UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md` (comprehensive documentation guide)
 
+**Fixes** (2026-10-13):
+- `uca` treated any word it did not recognize as "update everything". The option loop had no
+  default case, so `uca --version`, a common read-only probe, started a full update of every
+  harness. An unknown option or harness name now prints
+  `uca: unknown option or harness '<word>'; no update was run` and exits 2 before anything is
+  locked, probed or installed. Known options, harness names, `all`, and the status-only `--json`
+  are unchanged. Covered by `tests/test-uca-unknown-option.sh`.
+
 **Fixes** (2026-09-06):
 - `uca codex` could downgrade an npm- or bun-owned install and then report it as an update
   (`UPDATED: From version 0.153.2 to version 0.151.0`). npm 11's `min-release-age` (and bun's

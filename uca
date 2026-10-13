@@ -1994,6 +1994,13 @@ main() {
       --min-disk-mb)       shift; min_d="$1" ;;
       claude|codex|agy|grok|omp) target="$1" ;;
       all) target="" ;;
+      --json) ;;  # status-only flag; tolerated here so existing callers keep working
+      *)
+        # An unrecognized word must never fall through to a full update run:
+        # `uca --version` used to update every harness.
+        echo "uca: unknown option or harness '$1'; no update was run. See 'uca --help'." >&2
+        return 2
+        ;;
     esac
     shift 2>/dev/null || break
   done

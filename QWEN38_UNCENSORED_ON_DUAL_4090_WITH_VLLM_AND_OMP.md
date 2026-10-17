@@ -16,6 +16,18 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agen
 
 **Key options (agent-friendly):** `--dry-run` (print plan, change nothing) · `--verify` (diagnostics only, exit non-zero if broken) · `--start` (launch server + e2e smoke test) · `--with-service` (systemd user unit, auto-start on login) · `--modelscope` / `--hf` (pin download source) · `--quiet` (errors only) · `--uninstall` (add `--purge` to also delete weights) · `--port N` · `--data-root DIR` · `--force` (upgrade vLLM / rewrite scripts).
 
+If port 8000 already hosts another service, choose a free port during installation:
+
+```bash
+./install-qwen38-uncensored.sh --hf --port 8001 --data-root /path/to/qwenserve-data
+```
+
+This updates both the launcher and OMP's `providers.vllm.baseUrl` to `http://127.0.0.1:8001/v1`. The chosen port is saved under that data root and reused when you re-run with the same `--data-root`; an explicit `--port` overrides it. `qwenserve` defaults to loopback and checks the socket before importing vLLM. Runtime overrides such as `QWEN_PORT=8002 qwenserve` require the OMP URL to be updated to match.
+
+The launcher and stop command are compared against the complete generated content. A changed data root, vLLM path, port, or script body causes a backed-up, atomic update without requiring `--force`. Version reporting reads package metadata instead of repeatedly importing the ML stack. `--dry-run` and `--verify` acquire no install lock and create no temporary directories. Interrupted installs that leave a lock require inspection of `~/.local/bin/.qwenserve-install.lock` before removing it; a competing installer never removes the owner's lock.
+
+When `uv` or Bun is missing, the installer downloads its official GitHub release binary, verifies the release asset's published SHA256 and size, and atomically installs the selected executable with an existing-file backup. It refuses missing hashes, incomplete downloads, and mismatches. These checks trust the publisher's GitHub release metadata over HTTPS; they do not provide an independent signature check. Proxy environment variables are honored for these downloads.
+
 Then:
 
 ```bash
@@ -108,9 +120,19 @@ The installer copies the same-K L40S configs to RTX_4090 filenames inside the ve
 
 Single-stream is memory-bandwidth-bound so it barely moves; batched GEMMs are where tile configs pay. For the last few percent, run a true autotune sweep (`benchmarks/kernels/benchmark_w8a8_block_fp8.py` in the vLLM repo, patched with the 5 shapes above) — it writes the same filename format into the same directory.
 
+These measurements describe the vLLM 0.27.1 reference configuration. Newer versions can select a different kernel: the 0.31.0 validation run selected `MarlinFP8ScaledMMLinearKernel` on the 4090s. Copying the Triton configs does not prove that the selected backend uses them or that the historical throughput gain applies. Benchmark the running version before making a performance claim.
+
 ## Driver and CUDA
 
-vLLM 0.27 wheels bundle a CUDA 13.0 runtime. You want a recent driver — the reference box runs **595.71.05** (`nvidia-driver-595-open` on Ubuntu 25.10, hot-swapped without reboot: no display manager + no GPU processes → `modprobe -r nvidia_drm nvidia_uvm nvidia_modeset nvidia && modprobe nvidia`). A system CUDA toolkit is optional (Triton ships its own ptxas); `cuda-toolkit-13-3` from NVIDIA's repo is the current latest if you want nvcc around.
+The tested vLLM 0.31.0 environment has PyTorch 2.13.0 with a bundled CUDA 13.0 runtime. FlashInfer also compiles attention kernels at startup, so this configuration needs a **full CUDA toolkit**, including `nvcc`, runtime headers, and development libraries. Triton's bundled compiler tools do not replace that requirement.
+
+The installer and launcher check the toolkit against the installed PyTorch wheel without importing PyTorch. They prefer compatible toolkits under `/usr/local/cuda*`, then the compiler on `PATH`. The toolkit must have the same CUDA major version as PyTorch, at least its minor version, and support FlashInfer's `--compress-mode` flag (CUDA 12.8 or newer). An explicit `CUDA_HOME` or `CUDA_PATH` takes precedence and is checked rather than silently replaced. On the tested machine, `/usr/bin/nvcc` was CUDA 12.4 and failed during startup; selecting the existing `/usr/local/cuda-13.3` fixed that compiler selection. This affects the Qwen process only.
+
+Use a driver compatible with your wheel and toolkit. The current machine has driver **595.99.02**. For an explicit toolkit selection:
+
+```bash
+CUDA_HOME=/usr/local/cuda-13.3 qwenserve
+```
 
 The installer warns if your driver is older than 570 and continues.
 
@@ -128,6 +150,8 @@ hf download orcarouter/Qwen3.8-27B-Uncensored-FP8 --local-dir ./Qwen3.8-27B-Unce
 ```
 
 The installer auto-detects `hf auth login` state and uses HF when present; otherwise it interactively explains the HF signup/gate/token steps and offers ModelScope (the default when non-interactive). Downloads from outside China can be slower on ModelScope — use HF if you have access.
+
+A completed model requires valid core JSON files and every shard named by the safetensors index. The installer checks each shard's tensor names, header offsets, and file length to reject missing files, truncated downloads, Git LFS pointers, and absolute or traversal-based shard filenames. These structural checks do not hash all tensor payloads or prove inference quality.
 
 ModelScope's CLI is supplied by [`modelscope-hub`](https://pypi.org/project/modelscope-hub/), not the umbrella `modelscope` package. The installer runs it through `uv` in isolation, reusing the cached environment on subsequent runs and leaving global commands such as `ms` alone. The current download syntax takes a positional model ID and `--local-dir`.
 
@@ -157,8 +181,8 @@ Inside a session, `/model` lists it under **vllm** with thinking levels (low/med
 
 Two global commands, installed to `~/.local/bin`:
 
-- **`qwenserve`** — starts the server in the foreground on `http://127.0.0.1:8000` (OpenAI-compatible). Keep it in a tmux window, or use `--with-service` for a systemd user unit (`systemctl --user start qwenserve`; the installer enables linger so it survives logout). Env knobs: `QWEN_PORT`, `QWEN_TP`, `QWEN_MAX_LEN`, `QWEN_GPU_UTIL`, `QWEN_MAX_SEQS`, `QWEN_SPEC_TOKENS`.
-- **`qwenstop`** — stops it cleanly: stops the systemd unit if that's how it runs, `SIGTERM`s any `vllm serve` for this model however launched, waits up to 90s for VRAM to drain (SIGKILLing only leftover vLLM pids — never unrelated GPU processes), then prints per-GPU memory/power so you can watch the cards fall back to idle (~10-20 W from ~150 W under load).
+- **`qwenserve`** — starts the server in the foreground on the configured loopback port (OpenAI-compatible; default 8000). Keep it in a tmux window, or use `--with-service` for a systemd user unit (`systemctl --user start qwenserve`; the installer enables linger so it survives logout). Env knobs: `QWEN_PORT`, `QWEN_HOST`, `QWEN_MODEL_DIR`, `VLLM_BIN`, `QWEN_TP`, `QWEN_MAX_LEN`, `QWEN_GPU_UTIL`, `QWEN_MAX_SEQS`, `QWEN_SPEC_TOKENS`. Set `QWEN_HOST` explicitly if remote access is intended.
+- **`qwenstop`** — stops this model's processes: recognizes exact model arguments, inherited ownership tags, and supervised descendants, requests graceful shutdown, then waits up to 90 seconds before escalating against surviving owned processes. Linux pidfds and process start times fence signals against PID reuse. It stops the systemd unit only when its main PID belongs to this model, and reports GPU memory/power afterward. Unrelated models, generic `VLLM::` workers, and other jobs using the same venv are excluded. Older orphan workers with no ownership evidence are left alone.
 
 Why a dedicated stop command: vLLM spawns an API server, an EngineCore, and one worker per GPU — a bare `Ctrl-C` on the wrong process (or killing only the API server) can orphan workers holding ~15 GiB each, and the cards keep burning power. `qwenstop` is a safe no-op when nothing is running.
 
@@ -170,6 +194,8 @@ The first `qwenserve` launch runs `torch.compile` over the 64-layer hybrid graph
 
 | Symptom | Cause / fix |
 |:--------|:-----------|
+| Installer reports a new data root or vLLM version, but `qwenserve` runs an older one | Update and re-run the installer with the intended `--data-root` and `--port`. Generated commands now compare their full content and back up stale versions. |
+| `Address already in use` | Another service owns the port. Use `--port 8001` (or another free port) when installing; both the launcher and OMP URL are updated. The launcher checks this before loading vLLM. |
 | `No executables are provided by package modelscope` | Update the installer; it must run the CLI from `modelscope-hub`. Use the isolated command above for manual downloads. |
 | `ValueError: ... KV cache ... larger than available` | `QWEN_MAX_LEN` too big for your VRAM. vLLM prints the estimated max — use it. |
 | 5 tok/s on the very first request | One-time Triton kernel warmup. Second request runs at full speed. |
@@ -185,7 +211,9 @@ The first `qwenserve` launch runs `torch.compile` over the 64-layer hybrid graph
 ./install-qwen38-uncensored.sh --uninstall --purge  # also the venv and 31 GB of weights
 ```
 
-The uninstall stops a running server first (freeing the GPUs), removes `qwenserve`/`qwenstop`, removes the systemd unit, and removes the `vllm` block from `models.yml` (timestamped backup kept). Weights and the venv are kept unless `--purge`.
+Use the same `--data-root` for uninstalling a custom installation; the install summary prints the complete command. Uninstall refuses to remove a launcher belonging to a different data root, stops owned model processes, removes the commands and service, and removes only `providers.vllm` from `models.yml`, keeping a backup. Weights and the venv are kept unless `--purge`. Purge removes only that venv and model directory, preserving unrelated files, logs, and saved installation settings under the data root.
+
+`--verify` checks the generated commands against the selected installation and verifies the OMP URL matches its port. A responding server must advertise the expected model ID; `--start` additionally requires the requested `QWEN-OK` answer. Configuration checks alone do not certify that the model can load or answer requests.
 
 ---
 

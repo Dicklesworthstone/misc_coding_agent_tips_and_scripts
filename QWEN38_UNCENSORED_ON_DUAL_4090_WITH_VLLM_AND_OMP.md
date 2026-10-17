@@ -116,17 +116,22 @@ The installer warns if your driver is older than 570 and continues.
 
 ## Getting the weights: Hugging Face vs ModelScope
 
-The HF repo is **gated** (account + accept terms). The same weights are mirrored on ModelScope with **no login**:
+The HF repo is **gated** (account + accept terms). The installer also supports the same model ID on ModelScope, where public models need **no login**. Mirror availability can change: an anonymous 404 means the model or file is missing or private. In that case, use Hugging Face after obtaining access.
 
 ```bash
 # ModelScope (no login)
-modelscope download --model orcarouter/Qwen3.8-27B-Uncensored-FP8 --local_dir ./Qwen3.8-27B-Uncensored-FP8
+uv tool run --isolated --from modelscope-hub \
+  modelscope download orcarouter/Qwen3.8-27B-Uncensored-FP8 --local-dir ./Qwen3.8-27B-Uncensored-FP8
 
 # Hugging Face (if you have access)
 hf download orcarouter/Qwen3.8-27B-Uncensored-FP8 --local-dir ./Qwen3.8-27B-Uncensored-FP8
 ```
 
 The installer auto-detects `hf auth login` state and uses HF when present; otherwise it interactively explains the HF signup/gate/token steps and offers ModelScope (the default when non-interactive). Downloads from outside China can be slower on ModelScope — use HF if you have access.
+
+ModelScope's CLI is supplied by [`modelscope-hub`](https://pypi.org/project/modelscope-hub/), not the umbrella `modelscope` package. The installer runs it through `uv` in isolation, reusing the cached environment on subsequent runs and leaving global commands such as `ms` alone. The current download syntax takes a positional model ID and `--local-dir`.
+
+To skip the source prompt, pass `--modelscope` or `--hf`. With no reply within 120 seconds (or EOF), the prompt defaults to ModelScope; set `QWEN_INSTALL_PROMPT_TIMEOUT` to change the timeout. After an interrupted install, re-run with the same `--data-root` to reuse the vLLM venv and resume the download.
 
 ## Using it from omp
 
@@ -165,6 +170,7 @@ The first `qwenserve` launch runs `torch.compile` over the 64-layer hybrid graph
 
 | Symptom | Cause / fix |
 |:--------|:-----------|
+| `No executables are provided by package modelscope` | Update the installer; it must run the CLI from `modelscope-hub`. Use the isolated command above for manual downloads. |
 | `ValueError: ... KV cache ... larger than available` | `QWEN_MAX_LEN` too big for your VRAM. vLLM prints the estimated max — use it. |
 | 5 tok/s on the very first request | One-time Triton kernel warmup. Second request runs at full speed. |
 | `Using default W8A8 Block FP8 kernel config` in logs | Tuned configs missing — re-run the installer (step 4 is idempotent). |

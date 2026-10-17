@@ -417,9 +417,9 @@ choose_source() {
       "  3. create a READ token at https://huggingface.co/settings/tokens" \
       "  4. run:  hf auth login   (paste the token)" \
       "" \
-      "The SAME weights are mirrored on ModelScope with NO login:" \
+      "Alternatively, try ModelScope (no login for public models):" \
       "  https://modelscope.cn/models/$MODEL_ID" \
-      "(Downloads from outside China can be slower.)"
+      "(Mirror availability varies; downloads outside China can be slower.)"
     if ask_yn "Use Hugging Face now (you already ran 'hf auth login')? [y/N]" "n"; then
       SOURCE="hf"
     else
@@ -452,11 +452,15 @@ download_model() {
       ;;
     modelscope)
       info "Downloading $MODEL_ID from ModelScope (no login; ~31 GB)"
-      if ! command -v modelscope >/dev/null 2>&1; then
-        uv tool install modelscope
-        export PATH="$HOME/.local/bin:$PATH"
-      fi
-      modelscope download --model "$MODEL_ID" --local_dir "$MODEL_DIR"
+      # modelscope-hub owns the CLI. Run it in isolation: installing it globally
+      # also installs `ms`, which can collide with an unrelated command.
+      uv tool run --isolated --from modelscope-hub \
+        modelscope download "$MODEL_ID" --local-dir "$MODEL_DIR" || {
+          local download_status=$?
+          err "ModelScope download failed. If the mirror is missing or private, run 'hf auth login',"
+          err "then re-run this installer with --hf and the same --data-root."
+          return "$download_status"
+        }
       ;;
   esac
   if model_files_present; then

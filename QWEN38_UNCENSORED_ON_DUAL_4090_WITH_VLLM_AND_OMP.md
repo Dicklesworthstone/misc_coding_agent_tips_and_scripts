@@ -16,13 +16,13 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/misc_coding_agen
 
 **Key options (agent-friendly):** `--dry-run` (print plan, change nothing) · `--verify` (diagnostics only, exit non-zero if broken) · `--start` (launch server + e2e smoke test) · `--with-service` (systemd user unit, auto-start on login) · `--modelscope` / `--hf` (pin download source) · `--quiet` (errors only) · `--uninstall` (add `--purge` to also delete weights) · `--port N` · `--data-root DIR` · `--force` (upgrade vLLM / rewrite scripts).
 
-If port 8000 already hosts another service, choose a free port during installation:
+The default server port is 8001. If that port already hosts another service, choose a free port during installation:
 
 ```bash
-./install-qwen38-uncensored.sh --hf --port 8001 --data-root /path/to/qwenserve-data
+./install-qwen38-uncensored.sh --hf --port 8002 --data-root /path/to/qwenserve-data
 ```
 
-This updates both the launcher and OMP's `providers.vllm.baseUrl` to `http://127.0.0.1:8001/v1`. The chosen port is saved under that data root and reused when you re-run with the same `--data-root`; an explicit `--port` overrides it. `qwenserve` defaults to loopback and checks the socket before importing vLLM. Runtime overrides such as `QWEN_PORT=8002 qwenserve` require the OMP URL to be updated to match.
+This updates both the launcher and OMP's `providers.vllm.baseUrl` to `http://127.0.0.1:8002/v1`. The chosen port is saved under that data root and reused when you re-run with the same `--data-root`; an explicit `--port` overrides it. `qwenserve` defaults to loopback and checks the socket before importing vLLM. Runtime overrides such as `QWEN_PORT=8002 qwenserve` require the OMP URL to be updated to match.
 
 The launcher and stop command are compared against the complete generated content. A changed data root, vLLM path, port, or script body causes a backed-up, atomic update without requiring `--force`. Version reporting reads package metadata instead of repeatedly importing the ML stack. `--dry-run` and `--verify` acquire no install lock and create no temporary directories. Interrupted installs that leave a lock require inspection of `~/.local/bin/.qwenserve-install.lock` before removing it; a competing installer never removes the owner's lock.
 
@@ -31,7 +31,7 @@ When `uv` or Bun is missing, the installer downloads its official GitHub release
 Then:
 
 ```bash
-qwenserve                    # start the server (first start compiles kernels: ~10-20 min)
+qwenserve                    # start the server (cold compile; inductor autotune defaults off)
 omp --model vllm/Qwen3.8-27B-Uncensored   # in another shell: use it
 qwenstop                     # stop it; frees VRAM, GPUs drop back to idle power
 ```
@@ -45,7 +45,7 @@ qwenstop                     # stop it; frees VRAM, GPUs drop back to idle power
 | `qwenstop` | `~/.local/bin` | Stop it; drains VRAM; prints per-GPU memory/power at idle |
 | vLLM venv | `~/.local/share/qwenserve/venv` | Python 3.12 + latest vLLM, isolated |
 | Model weights (~31 GB) | `~/.local/share/qwenserve/models/` | Block-FP8 checkpoint from HF or ModelScope |
-| omp provider entry | `~/.omp/agent/models.yml` | Keyless `vllm` provider → `http://127.0.0.1:8000/v1` |
+| omp provider entry | `~/.omp/agent/models.yml` | Keyless `vllm` provider → `http://127.0.0.1:8001/v1` |
 | systemd unit (optional) | `~/.config/systemd/user/qwenserve.service` | `--with-service`; starts on login |
 | Compile cache | `~/.cache/vllm/torch_compile_cache` | Makes restarts ~2-5 min instead of ~10-20 |
 
@@ -56,7 +56,7 @@ qwenstop                     # stop it; frees VRAM, GPUs drop back to idle power
 ┃   omp --model vllm/Qwen3.8-27B-Uncensored                                ┃
 ┃        │  OpenAI-compatible chat + tools + reasoning                     ┃
 ┃        ▼                                                                 ┃
-┃   vLLM 0.27 server  (qwenserve: port 8000, FP8 KV, MTP draft head)       ┃
+┃   vLLM 0.27 server  (qwenserve: port 8001, FP8 KV, MTP draft head)       ┃
 ┃        │  tensor parallel = 2                                            ┃
 ┃        ▼                                                                 ┃
 ┃   GPU 0: ~15 GiB weights + KV  ◄──── PCIe TP allreduce ──►  GPU 1: same  ┃
@@ -164,7 +164,7 @@ omp has a built-in `vllm` provider that discovers models from `/v1/models` (and 
 ```yaml
 providers:
   vllm:
-    baseUrl: http://127.0.0.1:8000/v1
+    baseUrl: http://127.0.0.1:8001/v1
     auth: none
 ```
 
@@ -181,21 +181,25 @@ Inside a session, `/model` lists it under **vllm** with thinking levels (low/med
 
 Two global commands, installed to `~/.local/bin`:
 
-- **`qwenserve`** — starts the server in the foreground on the configured loopback port (OpenAI-compatible; default 8000). Keep it in a tmux window, or use `--with-service` for a systemd user unit (`systemctl --user start qwenserve`; the installer enables linger so it survives logout). Env knobs: `QWEN_PORT`, `QWEN_HOST`, `QWEN_MODEL_DIR`, `VLLM_BIN`, `QWEN_TP`, `QWEN_MAX_LEN`, `QWEN_GPU_UTIL`, `QWEN_MAX_SEQS`, `QWEN_SPEC_TOKENS`. Set `QWEN_HOST` explicitly if remote access is intended.
+- **`qwenserve`** — starts the server in the foreground on the configured loopback port (OpenAI-compatible; default 8001). Keep it in a tmux window, or use `--with-service` for a systemd user unit (`systemctl --user start qwenserve`; the installer enables linger so it survives logout). Env knobs: `QWEN_PORT`, `QWEN_HOST`, `QWEN_MODEL_DIR`, `VLLM_BIN`, `QWEN_TP`, `QWEN_MAX_LEN`, `QWEN_GPU_UTIL`, `QWEN_MAX_SEQS`, `QWEN_SPEC_TOKENS`. `VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE` and `VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING` default to `0`; set either to `1` before launch to opt into the slower kernel benchmark. Set `QWEN_HOST` explicitly if remote access is intended.
 - **`qwenstop`** — stops this model's processes: recognizes exact model arguments, inherited ownership tags, and supervised descendants, requests graceful shutdown, then waits up to 90 seconds before escalating against surviving owned processes. Linux pidfds and process start times fence signals against PID reuse. It stops the systemd unit only when its main PID belongs to this model, and reports GPU memory/power afterward. Unrelated models, generic `VLLM::` workers, and other jobs using the same venv are excluded. Older orphan workers with no ownership evidence are left alone.
 
 Why a dedicated stop command: vLLM spawns an API server, an EngineCore, and one worker per GPU — a bare `Ctrl-C` on the wrong process (or killing only the API server) can orphan workers holding ~15 GiB each, and the cards keep burning power. `qwenstop` is a safe no-op when nothing is running.
 
 ## What to expect on first start
 
-The first `qwenserve` launch runs `torch.compile` over the 64-layer hybrid graph plus the MTP drafter — **10-20 minutes** of one-time compilation (the shm_broadcast "no available block" log lines during this are benign). Artifacts cache to `~/.cache/vllm/torch_compile_cache`; subsequent starts are ~2-5 minutes. Note the cache key includes the serving config — changing `QWEN_SPEC_TOKENS` or batched-token limits recompiles once.
+The first `qwenserve` launch after a vLLM upgrade, a CUDA toolkit change, or a serving-config change runs `torch.compile` over the 64-layer hybrid graph plus the MTP drafter. vLLM's own defaults turn on Inductor max-autotune and coordinate-descent tuning, which benchmark every fused kernel and stretch that compile well past the 10-20 minutes a plain compile takes. `qwenserve` now forces both off unless you export `VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE=1` or `VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING=1` before launch. The shm_broadcast "no available block" lines during compile are benign.
+
+The compile cache is written only when that compile finishes, under `~/.cache/vllm/torch_compile_cache`. Stopping the process before the cache exists repeats the whole compile. The cache key includes the vLLM build, `CUDA_HOME`, the two autotune flags, and the serving config (`QWEN_SPEC_TOKENS`, `QWEN_MAX_LEN`, `QWEN_MAX_SEQS`, tensor parallel). A cache built with autotune on is not reused when autotune is off, and the reverse is also true. Leave `QWEN_MAX_LEN` at 163840: that is the 160k context this setup is for, and a shorter default would still miss a cache built at 163840.
+
+A start that hits the cache still reloads the weights and recaptures CUDA graphs. That warm path is the ~2-5 minutes. It is not a bug, and a second `qwenserve` beside one that is already compiling does not make the first one faster.
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |:--------|:-----------|
 | Installer reports a new data root or vLLM version, but `qwenserve` runs an older one | Update and re-run the installer with the intended `--data-root` and `--port`. Generated commands now compare their full content and back up stale versions. |
-| `Address already in use` | Another service owns the port. Use `--port 8001` (or another free port) when installing; both the launcher and OMP URL are updated. The launcher checks this before loading vLLM. |
+| `Address already in use` | Another service owns the port. Use `--port` with a free port when installing; both the launcher and OMP URL are updated. The launcher checks this before loading vLLM. |
 | `No executables are provided by package modelscope` | Update the installer; it must run the CLI from `modelscope-hub`. Use the isolated command above for manual downloads. |
 | `ValueError: ... KV cache ... larger than available` | `QWEN_MAX_LEN` too big for your VRAM. vLLM prints the estimated max — use it. |
 | 5 tok/s on the very first request | One-time Triton kernel warmup. Second request runs at full speed. |

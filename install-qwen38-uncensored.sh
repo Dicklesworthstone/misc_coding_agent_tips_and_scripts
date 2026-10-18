@@ -44,12 +44,14 @@
 #   --force            Reinstall/upgrade even when components look current
 #   --quiet            Suppress non-error output
 #   --no-gum           Disable gum formatting even if available
-#   --port N           Server port (default: 8000)
+#   --port N           Server port (default: 8001)
 #   --data-root DIR    Base dir for venv + models (default: ~/.local/share/qwenserve)
 #   --help             Show this help
 #
 # Env overrides honored by the installed qwenserve script:
 #   QWEN_PORT QWEN_TP QWEN_MAX_LEN QWEN_GPU_UTIL QWEN_MAX_SEQS QWEN_SPEC_TOKENS
+#   VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE (default 0)
+#   VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING (default 0)
 #
 # See: QWEN38_UNCENSORED_ON_DUAL_4090_WITH_VLLM_AND_OMP.md
 
@@ -68,7 +70,7 @@ MIN_TOTAL_VRAM_GB=36        # weights ~31 GB FP8 + minimum KV cache
 RECOMMENDED_VRAM_GB=44      # comfortable 2x24 GB
 MIN_DRIVER_MAJOR=570        # CUDA 12.8+ wheels; 580+ recommended (CUDA 13)
 
-PORT=8000
+PORT=8001
 PORT_EXPLICIT=0
 DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/qwenserve"
 BIN_DIR="$HOME/.local/bin"
@@ -867,6 +869,13 @@ fi
 export QWENSERVE_MODEL_DIR
 QWENSERVE_MODEL_DIR=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$MODEL_DIR")
 printf 'qwenserve: %s on http://%s:%s (vLLM: %s)\n' "$MODEL_DIR" "$HOST" "$PORT" "$VLLM_BIN"
+# Inductor max-autotune and coordinate descent benchmark every fused kernel
+# on a cold start, and the compile-cache key includes both flags. Default
+# them off. Export either as 1 to opt into the tuned kernels; that rebuilds
+# the cache once and does not reuse a cache built with the other setting.
+: "${VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE:=0}"
+: "${VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING:=0}"
+export VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING
 exec "$VLLM_BIN" serve "$MODEL_DIR" \
   --served-model-name "$SERVED_NAME" \
   --tensor-parallel-size "$TP" \
@@ -1008,8 +1017,10 @@ install_qwenserve() {
     "  qwenserve   Start the model server on http://127.0.0.1:$PORT" \
     "              (OpenAI-compatible). Runs in the foreground — keep" \
     "              it in a tmux/terminal, or use --with-service instead." \
-    "              First start compiles kernels once (~10-20 min);" \
-    "              later starts take ~2-5 min (cached)." \
+    "              First start compiles kernels. Autotune defaults" \
+    "              off; export VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE=1" \
+    "              to benchmark. A finished cache makes later starts" \
+    "              ~2-5 min (weight load plus CUDA graph capture)." \
     "" \
     "  qwenstop    Stop the server and free the GPUs: sends SIGTERM," \
     "              waits for workers to exit, SIGKILLs only owned Qwen" \
@@ -1017,7 +1028,8 @@ install_qwenserve() {
     "              so you can confirm the cards are back at idle." \
     "" \
     "  Tunables (env):  QWEN_MAX_LEN=262144 qwenserve   # bigger context" \
-    "                   QWEN_SPEC_TOKENS=4  qwenserve   # MTP draft depth"
+    "                   QWEN_SPEC_TOKENS=4  qwenserve   # MTP draft depth" \
+    "                   VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE=1 qwenserve"
 
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
@@ -1056,7 +1068,7 @@ EOF
   systemctl --user daemon-reload
   systemctl --user enable "$SERVICE_NAME" >/dev/null 2>&1 || { err "Could not enable $SERVICE_NAME"; return 1; }
   ok "Service installed (start with: systemctl --user start $SERVICE_NAME)"
-  warn "First start compiles kernels — 'journalctl --user -u $SERVICE_NAME -f' to watch."
+  warn "First start compiles kernels — 'journalctl --user -u $SERVICE_NAME -f' to watch. Inductor autotune is off unless VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE=1."
 }
 
 # ── omp install + provider wiring ────────────────────────────────────────────
@@ -1451,7 +1463,7 @@ main() {
     "Uninstall:          $uninstall_command   (add --purge to delete weights)")
   draw_box "0;32" "${lines[@]+"${lines[@]}"}"
   if [ "$DO_START" -eq 0 ]; then
-    warn "First 'qwenserve' launch compiles kernels once (~10-20 min). Later starts take ~2-5 min (cached)."
+    warn "First 'qwenserve' launch compiles kernels (autotune off unless VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE=1). A finished cache makes later starts ~2-5 min: weight load plus CUDA graph capture."
   fi
 }
 

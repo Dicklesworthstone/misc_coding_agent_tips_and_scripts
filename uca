@@ -152,18 +152,85 @@ draw_box() {
   echo -e "\033[38;5;${color_code}m╚${border}╝\033[0m"
 }
 
+# Healthy runs finish in seconds (the slowest logged run is ~11 minutes).
+# A live PID older than this is wedged: bash 5.3 on macOS can block forever
+# inside a here-document write, and a dead reader's pipe never returns.
+LOCK_MAX_AGE_SECS="${UCA_LOCK_MAX_AGE_SECS:-1800}"
+
+pid_elapsed_secs() {
+  local et="$1" days=0 h m s a b c
+  [ -n "$et" ] || return 1
+  if [[ "$et" == *-* ]]; then
+    days="${et%%-*}"
+    et="${et#*-}"
+  fi
+  IFS=: read -r a b c <<< "$et"
+  if [ -n "${c:-}" ]; then
+    h=$((10#$a)); m=$((10#$b)); s=$((10#$c))
+  else
+    h=0; m=$((10#$a)); s=$((10#${b:-0}))
+  fi
+  echo $((days * 86400 + h * 3600 + m * 60 + s))
+}
+
+pid_is_uca() {
+  local cmd
+  cmd=$(ps -p "$1" -o command= 2>/dev/null || true)
+  case "$cmd" in
+    *bin/uca|*bin/uca\ *) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Stop a wedged uca holder. TERM first so its lock trap can run; KILL if the
+# here-document write restarts the syscall and ignores the trap.
+stop_uca_pid() {
+  local old_pid="$1" pgid i
+  [ -n "$old_pid" ] || return 0
+  [ "$old_pid" = "$$" ] && return 0
+  kill -0 "$old_pid" 2>/dev/null || return 0
+  pgid=$(ps -o pgid= -p "$old_pid" 2>/dev/null | tr -d ' ')
+  if [ -n "$pgid" ]; then
+    kill -TERM -- "-$pgid" 2>/dev/null || kill -TERM "$old_pid" 2>/dev/null || true
+  else
+    kill -TERM "$old_pid" 2>/dev/null || true
+  fi
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$old_pid" 2>/dev/null || return 0
+    sleep 0.2
+  done
+  if [ -n "$pgid" ]; then
+    kill -KILL -- "-$pgid" 2>/dev/null || kill -KILL "$old_pid" 2>/dev/null || true
+  else
+    kill -KILL "$old_pid" 2>/dev/null || true
+  fi
+  sleep 0.2
+}
+
 # Atomic Locking with Stale PID Detection & Signal Trap
 acquire_lock() {
   mkdir -p "$STATE_DIR"
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     local pid_file="$LOCK_DIR/pid"
+    local old_pid="" reclaim=0 age=0 et=""
     if [ -f "$pid_file" ]; then
-      local old_pid
       old_pid=$(cat "$pid_file" 2>/dev/null || echo "")
-      if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-        echo -e "${C_YELLOW}⚠ Another UCA process (PID $old_pid) is currently running. Skipping.${C_RESET}" >&2
-        exit 0
+    fi
+    if [ -z "$old_pid" ] || ! kill -0 "$old_pid" 2>/dev/null; then
+      reclaim=1
+    elif pid_is_uca "$old_pid"; then
+      et=$(ps -o etime= -p "$old_pid" 2>/dev/null | tr -d ' ')
+      age=$(pid_elapsed_secs "$et" 2>/dev/null || echo 0)
+      if [ "$age" -ge "$LOCK_MAX_AGE_SECS" ]; then
+        echo -e "${C_YELLOW}⚠ UCA PID $old_pid has been running for ${age}s (limit ${LOCK_MAX_AGE_SECS}s). Reclaiming the lock.${C_RESET}" >&2
+        echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] uca lock reclaim: pid=$old_pid age=${age}s" >> "$LOG_FILE" 2>/dev/null || true
+        stop_uca_pid "$old_pid"
+        reclaim=1
       fi
+    fi
+    if [ "$reclaim" -ne 1 ]; then
+      echo -e "${C_YELLOW}⚠ Another UCA process (PID $old_pid) is currently running. Skipping.${C_RESET}" >&2
+      exit 0
     fi
     # Reclaim stale lock
     rm -rf "$LOCK_DIR" 2>/dev/null || true
@@ -172,7 +239,8 @@ acquire_lock() {
     fi
   fi
   echo "$$" > "$LOCK_DIR/pid"
-  trap 'release_lock; exit 130' INT TERM HUP
+  trap 'release_lock' EXIT
+  trap 'exit 130' INT TERM HUP
 }
 
 release_lock() {
@@ -525,69 +593,72 @@ read_harness_prev_version_from_state() {
   ' "$STATE_FILE" 2>/dev/null || true
 }
 
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+write_state_harness() {
+  local key="$1" name="$2" installed="$3" current="$4" previous="$5" status="$6" checked="$7" comma="$8"
+  printf '    "%s": {\n' "$key"
+  printf '      "name": "%s",\n' "$(json_escape "$name")"
+  printf '      "installed": %s,\n' "$installed"
+  printf '      "current_version": "%s",\n' "$(json_escape "$current")"
+  printf '      "previous_version": "%s",\n' "$(json_escape "$previous")"
+  printf '      "last_status": "%s",\n' "$(json_escape "$status")"
+  printf '      "last_checked_at": "%s"\n' "$(json_escape "$checked")"
+  printf '    }%s\n' "$comma"
+}
+
 write_state() {
   local last_run_iso="$1" last_status="$2" duration="$3"
   local mru_key="${4:-}" mru_from="${5:-}" mru_to="${6:-}" mru_ts="${7:-}"
-  
+
   mkdir -p "$STATE_DIR"
   local tmp_file="$STATE_FILE.tmp.$$"
+  local inst_claude=false inst_codex=false inst_agy=false inst_grok=false inst_omp=false
 
-  cat > "$tmp_file" <<EOF
-{
-  "version": 1,
-  "last_run_at": "$last_run_iso",
-  "last_run_duration_secs": $duration,
-  "last_run_status": "$last_status",
-  "most_recently_updated": {
-    "key": "$mru_key",
-    "from_version": "$mru_from",
-    "to_version": "$mru_to",
-    "timestamp": "$mru_ts"
-  },
-  "harnesses": {
-    "claude": {
-      "name": "Claude Code",
-      "installed": $( [ -n "${V_CLAUDE:-}" ] && echo "true" || echo "false" ),
-      "current_version": "${V_CLAUDE:-}",
-      "previous_version": "${PV_CLAUDE:-${V_CLAUDE:-}}",
-      "last_status": "${ST_CLAUDE:-up_to_date}",
-      "last_checked_at": "$last_run_iso"
-    },
-    "codex": {
-      "name": "OpenAI Codex",
-      "installed": $( [ -n "${V_CODEX:-}" ] && echo "true" || echo "false" ),
-      "current_version": "${V_CODEX:-}",
-      "previous_version": "${PV_CODEX:-${V_CODEX:-}}",
-      "last_status": "${ST_CODEX:-up_to_date}",
-      "last_checked_at": "$last_run_iso"
-    },
-    "agy": {
-      "name": "Google Antigravity",
-      "installed": $( [ -n "${V_AGY:-}" ] && echo "true" || echo "false" ),
-      "current_version": "${V_AGY:-}",
-      "previous_version": "${PV_AGY:-${V_AGY:-}}",
-      "last_status": "${ST_AGY:-up_to_date}",
-      "last_checked_at": "$last_run_iso"
-    },
-    "grok": {
-      "name": "xAI Grok",
-      "installed": $( [ -n "${V_GROK:-}" ] && echo "true" || echo "false" ),
-      "current_version": "${V_GROK:-}",
-      "previous_version": "${PV_GROK:-${V_GROK:-}}",
-      "last_status": "${ST_GROK:-up_to_date}",
-      "last_checked_at": "$last_run_iso"
-    },
-    "omp": {
-      "name": "OMP",
-      "installed": $( [ -n "${V_OMP:-}" ] && echo "true" || echo "false" ),
-      "current_version": "${V_OMP:-}",
-      "previous_version": "${PV_OMP:-${V_OMP:-}}",
-      "last_status": "${ST_OMP:-up_to_date}",
-      "last_checked_at": "$last_run_iso"
-    }
-  }
-}
-EOF
+  # printf, not a here-document. On macOS, bash 5.3 writes a here-document into
+  # a pipe before the reader is started. This function's document is ~1.5KB,
+  # past Darwin's 512-byte PIPE_BUF, and the 2026-10-22 run wedged here for
+  # 18 hours after `cat` was signaled ("Terminated: 15" in uca-error.log).
+  # The parent waited on that writer and held the lock, so every later uca
+  # printed "Another UCA process is currently running. Skipping."
+  [ -n "${V_CLAUDE:-}" ] && inst_claude=true
+  [ -n "${V_CODEX:-}" ] && inst_codex=true
+  [ -n "${V_AGY:-}" ] && inst_agy=true
+  [ -n "${V_GROK:-}" ] && inst_grok=true
+  [ -n "${V_OMP:-}" ] && inst_omp=true
+  case "$duration" in
+    ''|*[!0-9]*) duration=0 ;;
+  esac
+
+  {
+    printf '{\n'
+    printf '  "version": 1,\n'
+    printf '  "last_run_at": "%s",\n' "$(json_escape "$last_run_iso")"
+    printf '  "last_run_duration_secs": %s,\n' "$duration"
+    printf '  "last_run_status": "%s",\n' "$(json_escape "$last_status")"
+    printf '  "most_recently_updated": {\n'
+    printf '    "key": "%s",\n' "$(json_escape "$mru_key")"
+    printf '    "from_version": "%s",\n' "$(json_escape "$mru_from")"
+    printf '    "to_version": "%s",\n' "$(json_escape "$mru_to")"
+    printf '    "timestamp": "%s"\n' "$(json_escape "$mru_ts")"
+    printf '  },\n'
+    printf '  "harnesses": {\n'
+    write_state_harness claude "Claude Code" "$inst_claude" "${V_CLAUDE:-}" "${PV_CLAUDE:-${V_CLAUDE:-}}" "${ST_CLAUDE:-up_to_date}" "$last_run_iso" ","
+    write_state_harness codex "OpenAI Codex" "$inst_codex" "${V_CODEX:-}" "${PV_CODEX:-${V_CODEX:-}}" "${ST_CODEX:-up_to_date}" "$last_run_iso" ","
+    write_state_harness agy "Google Antigravity" "$inst_agy" "${V_AGY:-}" "${PV_AGY:-${V_AGY:-}}" "${ST_AGY:-up_to_date}" "$last_run_iso" ","
+    write_state_harness grok "xAI Grok" "$inst_grok" "${V_GROK:-}" "${PV_GROK:-${V_GROK:-}}" "${ST_GROK:-up_to_date}" "$last_run_iso" ","
+    write_state_harness omp "OMP" "$inst_omp" "${V_OMP:-}" "${PV_OMP:-${V_OMP:-}}" "${ST_OMP:-up_to_date}" "$last_run_iso" ""
+    printf '  }\n'
+    printf '}\n'
+  } > "$tmp_file"
   mv -f "$tmp_file" "$STATE_FILE"
 }
 
@@ -1363,12 +1434,20 @@ run_doctor_suite() {
   # 1. DET-LOCK-STALE
   local stale_lock=0
   if [ -d "$LOCK_DIR" ] && [ -f "$LOCK_DIR/pid" ]; then
-    local lock_pid
+    local lock_pid lock_age lock_et
     lock_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
     if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
       stale_lock=1
       findings+=("DET-LOCK-STALE: Stale lock directory left by dead PID $lock_pid")
       fixes_planned+=("FIX-LOCK-STALE: Reclaim stale lock directory ($LOCK_DIR)")
+    elif [ -n "$lock_pid" ] && pid_is_uca "$lock_pid"; then
+      lock_et=$(ps -o etime= -p "$lock_pid" 2>/dev/null | tr -d ' ')
+      lock_age=$(pid_elapsed_secs "$lock_et" 2>/dev/null || echo 0)
+      if [ "$lock_age" -ge "$LOCK_MAX_AGE_SECS" ]; then
+        stale_lock=1
+        findings+=("DET-LOCK-STALE: UCA PID $lock_pid has held the lock for ${lock_age}s")
+        fixes_planned+=("FIX-LOCK-STALE: Stop wedged UCA PID $lock_pid and reclaim $LOCK_DIR")
+      fi
     fi
   fi
 
@@ -1506,6 +1585,11 @@ EOF
 
     # Fix 1: Stale Lock
     if [ "$stale_lock" -eq 1 ]; then
+      local wedged_pid=""
+      wedged_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+      if [ -n "$wedged_pid" ] && kill -0 "$wedged_pid" 2>/dev/null && pid_is_uca "$wedged_pid"; then
+        stop_uca_pid "$wedged_pid"
+      fi
       doctor_mutate "$run_dir" "$LOCK_DIR/pid" "delete_file"
       rm -rf "$LOCK_DIR" 2>/dev/null || true
       echo -e "  ${C_GREEN}✔${C_RESET} [FIX-LOCK-STALE] Reclaimed stale lock directory"
